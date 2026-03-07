@@ -43,13 +43,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import com.leninasto.cybercontrol.ui.theme.CyberControlTheme
 import kotlinx.coroutines.delay
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
-import java.time.Instant
 import java.time.LocalTime
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.*
@@ -123,6 +124,108 @@ enum class AppDestinations(val label: String, val icon: ImageVector) {
     CABINS("Cabinas", Icons.Default.Home),
     STATS("Ventas", Icons.AutoMirrored.Filled.List),
     SETTINGS("Ajustes", Icons.Default.Settings),
+}
+
+// --- PERSISTENCIA ---
+
+fun saveAppSettings(context: Context, settings: AppSettings) {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val json = JSONObject().apply {
+        put("cabinCount", settings.cabinCount)
+        put("includeCabinZero", settings.includeCabinZero)
+        put("closingTime", settings.closingTime)
+        put("priceGroups", JSONArray().apply {
+            settings.priceGroups.forEach { group ->
+                put(JSONObject().apply {
+                    put("id", group.id)
+                    put("name", group.name)
+                    put("cabinRange", group.cabinRange)
+                    put("pricePerHour", group.pricePerHour)
+                    put("presets", JSONArray().apply {
+                        group.presets.forEach { put(JSONObject().apply {
+                            put("label", it.label)
+                            put("durationMillis", it.durationMillis)
+                            put("price", it.price)
+                        }) }
+                    })
+                })
+            }
+        })
+        put("products", JSONArray().apply {
+            settings.products.forEach { put(JSONObject().apply {
+                put("id", it.id)
+                put("name", it.name)
+                put("price", it.price)
+            }) }
+        })
+    }
+    prefs.edit().putString("settings", json.toString()).apply()
+}
+
+fun loadAppSettings(context: Context): AppSettings {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val jsonStr = prefs.getString("settings", null) ?: return AppSettings()
+    return try {
+        val json = JSONObject(jsonStr)
+        val groups = mutableListOf<PriceGroup>()
+        val groupsArray = json.optJSONArray("priceGroups")
+        if (groupsArray != null) {
+            for (i in 0 until groupsArray.length()) {
+                val g = groupsArray.getJSONObject(i)
+                val presets = mutableListOf<PrepaidPreset>()
+                val ps = g.optJSONArray("presets")
+                if (ps != null) {
+                    for (j in 0 until ps.length()) {
+                        val p = ps.getJSONObject(j)
+                        presets.add(PrepaidPreset(p.getString("label"), p.getLong("durationMillis"), p.getDouble("price")))
+                    }
+                }
+                groups.add(PriceGroup(g.getString("id"), g.getString("name"), g.getString("cabinRange"), g.getDouble("pricePerHour"), presets))
+            }
+        }
+        val prods = mutableListOf<ExtraItem>()
+        val prodsArray = json.optJSONArray("products")
+        if (prodsArray != null) {
+            for (i in 0 until prodsArray.length()) {
+                val p = prodsArray.getJSONObject(i)
+                prods.add(ExtraItem(p.getString("id"), p.getString("name"), p.getDouble("price")))
+            }
+        }
+        AppSettings(
+            cabinCount = json.optInt("cabinCount", 10),
+            includeCabinZero = json.optBoolean("includeCabinZero", false),
+            closingTime = json.optString("closingTime", "22:00"),
+            priceGroups = if (groups.isEmpty()) AppSettings().priceGroups else groups,
+            products = if (prods.isEmpty()) AppSettings().products else prods
+        )
+    } catch (e: Exception) { AppSettings() }
+}
+
+fun saveSales(context: Context, sales: List<Sale>) {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val array = JSONArray()
+    sales.forEach { s ->
+        array.put(JSONObject().apply {
+            put("id", s.id); put("cabinName", s.cabinName); put("amount", s.amount)
+            put("paymentMethod", s.paymentMethod); put("timestamp", s.timestamp)
+            put("startTime", s.startTime); put("endTime", s.endTime)
+        })
+    }
+    prefs.edit().putString("sales", array.toString()).apply()
+}
+
+fun loadSales(context: Context): List<Sale> {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val jsonStr = prefs.getString("sales", null) ?: return emptyList()
+    return try {
+        val array = JSONArray(jsonStr)
+        val list = mutableListOf<Sale>()
+        for (i in 0 until array.length()) {
+            val s = array.getJSONObject(i)
+            list.add(Sale(s.getLong("id"), s.getString("cabinName"), s.getDouble("amount"), s.getString("paymentMethod"), s.getLong("timestamp"), s.optLong("startTime"), s.optLong("endTime")))
+        }
+        list
+    } catch (e: Exception) { emptyList() }
 }
 
 // --- UTILIDADES ---
@@ -201,13 +304,10 @@ fun CircularWavyProgressIndicator(
         val strokeWidth = 4.dp.toPx()
         val radius = (size.minDimension / 2) - strokeWidth
         val center = Offset(size.width / 2, size.height / 2)
-
         drawCircle(color = color.copy(alpha = 0.1f), radius = radius, style = Stroke(width = strokeWidth))
-
         val path = Path()
         val segments = 120
         val sweepAngle = 360f * progress
-        
         for (i in 0..segments) {
             val angleDeg = -90f + (sweepAngle * i / segments)
             val angleRad = Math.toRadians(angleDeg.toDouble()).toFloat()
@@ -218,12 +318,7 @@ fun CircularWavyProgressIndicator(
             val y = center.y + r * sin(angleRad)
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
-        
-        drawPath(
-            path = path,
-            color = if (isTimeUp) Color.Red else color,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-        )
+        drawPath(path = path, color = if (isTimeUp) Color.Red else color, style = Stroke(width = strokeWidth, cap = StrokeCap.Round))
     }
 }
 
@@ -239,18 +334,22 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun CyberControlApp() {
+    val context = LocalContext.current
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.CABINS) }
-    var settings by remember { mutableStateOf(AppSettings()) }
+    var settings by remember { mutableStateOf(loadAppSettings(context)) }
     val cabins = remember { mutableStateListOf<Cabin>() }
     val sales = remember { mutableStateListOf<Sale>() }
 
+    LaunchedEffect(Unit) { sales.addAll(loadSales(context)) }
+    LaunchedEffect(sales.size) { saveSales(context, sales) }
+
     LaunchedEffect(settings.cabinCount, settings.includeCabinZero) {
         val startId = if (settings.includeCabinZero) 0 else 1
-        val currentActiveCabins = cabins.filter { it.isOccupied }.associateBy { it.id }
+        val active = cabins.filter { it.isOccupied }.associateBy { it.id }
         cabins.clear()
         for (i in 0 until settings.cabinCount) {
             val id = startId + i
-            cabins.add(currentActiveCabins[id] ?: Cabin(id = id, name = "PC $id"))
+            cabins.add(active[id] ?: Cabin(id = id, name = "PC $id"))
         }
     }
 
@@ -271,7 +370,7 @@ fun CyberControlApp() {
                 when (currentDestination) {
                     AppDestinations.CABINS -> CabinsScreen(cabins, settings) { sale -> sales.add(sale) }
                     AppDestinations.STATS -> StatsScreen(sales)
-                    AppDestinations.SETTINGS -> SettingsScreen(settings, onSettingsChange = { settings = it })
+                    AppDestinations.SETTINGS -> SettingsScreen(settings, onSettingsChange = { settings = it; saveAppSettings(context, it) })
                 }
             }
         }
@@ -346,51 +445,81 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
     val cost = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidPrice + cabin.extras.sumOf { it.price }
     else (elapsed / 3600000.0) * group.pricePerHour + cabin.extras.sumOf { it.price }
 
-    ElevatedCard(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(
-        containerColor = when {
-            isTimeUp -> MaterialTheme.colorScheme.errorContainer
-            cabin.isPaused -> MaterialTheme.colorScheme.secondaryContainer
-            cabin.isOccupied -> MaterialTheme.colorScheme.primaryContainer
-            else -> MaterialTheme.colorScheme.surface
-        }
-    )) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(60.dp)) {
-                Icon(Icons.Default.Computer, null, modifier = Modifier.size(40.dp), tint = when {
-                    cabin.isPaused -> Color(0xFFFFC107); cabin.isOccupied -> Color.Green; else -> Color.Gray
-                })
-                Text(cabin.name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = when {
+                isTimeUp -> MaterialTheme.colorScheme.errorContainer
+                cabin.isPaused -> MaterialTheme.colorScheme.secondaryContainer
+                cabin.isOccupied -> MaterialTheme.colorScheme.primaryContainer
+                else -> MaterialTheme.colorScheme.surface
             }
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                if (cabin.isOccupied) {
-                    if (cabin.mode == SessionMode.PREPAID) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            val progressValue = (timeRem.toFloat() / (if (cabin.prepaidDurationMillis > 0) cabin.prepaidDurationMillis.toFloat() else 1f)).coerceIn(0f, 1f)
-                            CircularWavyProgressIndicator(progress = progressValue, isTimeUp = isTimeUp, modifier = Modifier.size(40.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text(formatTime(timeRem), fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
-                                Text("Inicio: ${formatClockTime(cabin.startTimeMillis)} | Fin: ${formatClockTime(cabin.startTimeMillis + cabin.prepaidDurationMillis + cabin.totalPausedDuration)}", style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    } else {
-                        Text(formatTime(elapsed), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                        Text("Inicio: ${formatClockTime(cabin.startTimeMillis)}", style = MaterialTheme.typography.bodySmall)
-                    }
-                } else {
-                    Text("Disponible", style = MaterialTheme.typography.titleMedium, color = Color.Gray)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Fila Superior: Identidad y Costo
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Computer, null, modifier = Modifier.size(24.dp),
+                        tint = when { cabin.isPaused -> Color(0xFFFFC107); cabin.isOccupied -> Color.Green; else -> Color.Gray }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(cabin.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 }
-                Text("${group.name}: S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h", style = MaterialTheme.typography.bodySmall)
+                if (cabin.isOccupied) {
+                    Text(
+                        text = "S/ ${String.format(Locale.getDefault(), "%.2f", cost)}",
+                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black,
+                        color = if (isTimeUp) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                    )
+                }
             }
-            Column(horizontalAlignment = Alignment.End) {
-                if (cabin.isOccupied) Text(text = String.format(Locale.getDefault(), "S/ %.2f", cost), fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (!cabin.isOccupied) Button(onClick = { showStartDialog = true }) { Text("INICIAR") }
-                    else {
-                        IconButton(onClick = { showExtraDialog = true }) { Icon(Icons.Default.ShoppingCart, null) }
+
+            Spacer(Modifier.height(8.dp))
+
+            // Cuerpo Central: Tiempo y Progreso (Aquí es donde estaba el error de ancho)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (cabin.isOccupied && cabin.mode == SessionMode.PREPAID) {
+                    val progressValue = (timeRem.toFloat() / (if (cabin.prepaidDurationMillis > 0) cabin.prepaidDurationMillis.toFloat() else 1f)).coerceIn(0f, 1f)
+                    CircularWavyProgressIndicator(progress = progressValue, isTimeUp = isTimeUp, modifier = Modifier.size(44.dp))
+                    Spacer(Modifier.width(12.dp))
+                }
+                
+                if (cabin.isOccupied) {
+                    Text(
+                        text = if (cabin.mode == SessionMode.PREPAID) formatTime(timeRem) else formatTime(elapsed),
+                        style = MaterialTheme.typography.displaySmall.copy(fontSize = 32.sp),
+                        fontWeight = FontWeight.Black,
+                        color = if (isTimeUp) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                    )
+                } else {
+                    Text("Disponible", style = MaterialTheme.typography.headlineSmall, color = Color.Gray.copy(alpha = 0.5f))
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Fila Inferior: Info de Horas y Acciones
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    if (cabin.isOccupied) {
+                        Text("Inicio: ${formatClockTime(cabin.startTimeMillis)}", style = MaterialTheme.typography.bodySmall)
                         if (cabin.mode == SessionMode.PREPAID) {
-                            IconButton(onClick = { showAddTimeDialog = true }) { Icon(Icons.Default.AddAlarm, null) }
+                            val endTime = cabin.startTimeMillis + cabin.prepaidDurationMillis + cabin.totalPausedDuration
+                            Text("Fin: ${formatClockTime(endTime)}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Text("${group.name}: S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (!cabin.isOccupied) {
+                        Button(onClick = { showStartDialog = true }) { Text("INICIAR") }
+                    } else {
+                        IconButton(onClick = { showExtraDialog = true }) { Icon(Icons.Default.ShoppingCart, null, modifier = Modifier.size(22.dp)) }
+                        if (cabin.mode == SessionMode.PREPAID) {
+                            IconButton(onClick = { showAddTimeDialog = true }) { Icon(Icons.Default.AddAlarm, null, modifier = Modifier.size(22.dp)) }
                         }
                         IconButton(onClick = {
                             if (cabin.isPaused) {
@@ -399,8 +528,8 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
                             } else {
                                 onUpdate(cabin.copy(isPaused = true, pausedTimeMillis = System.currentTimeMillis()))
                             }
-                        }) { Icon(if (cabin.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null) }
-                        IconButton(onClick = { showSummaryDialog = true }) { Icon(Icons.Default.Clear, null, tint = Color.Red) }
+                        }) { Icon(if (cabin.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null, modifier = Modifier.size(22.dp)) }
+                        IconButton(onClick = { showSummaryDialog = true }) { Icon(Icons.Default.Close, null, tint = Color.Red, modifier = Modifier.size(22.dp)) }
                     }
                 }
             }
@@ -539,7 +668,7 @@ fun AddExtraDialog(products: List<ExtraItem>, onDismiss: () -> Unit, onAdd: (Ext
                 }
                 LazyColumn(modifier = Modifier.heightIn(max = 250.dp)) {
                     items(products) { p ->
-                        ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("S/ ${String.format("%.2f", p.price)}") }, trailingContent = { IconButton(onClick = { onAdd(p) }) { Icon(Icons.Default.Add, null) } })
+                        ListItem(headlineContent = { Text(p.name) }, supportingContent = { Text("S/ ${String.format(Locale.getDefault(), "%.2f", p.price)}") }, trailingContent = { IconButton(onClick = { onAdd(p) }) { Icon(Icons.Default.Add, null) } })
                     }
                 }
             } else {
@@ -594,7 +723,7 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
         settings.priceGroups.forEach { group ->
             ListItem(
                 headlineContent = { Text("${group.name} (${group.cabinRange})") },
-                supportingContent = { Text("S/ ${String.format("%.2f", group.pricePerHour)}/h | ${group.presets.size} presets") },
+                supportingContent = { Text("S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h | ${group.presets.size} presets") },
                 trailingContent = {
                     Row {
                         IconButton(onClick = { editingGroupPresets = group }) { Icon(Icons.Default.Settings, null) }
@@ -617,7 +746,7 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
             ListItem(
                 modifier = Modifier.clickable { showProductDialog = p },
                 headlineContent = { Text(p.name) },
-                supportingContent = { Text("S/ ${String.format("%.2f", p.price)}") },
+                supportingContent = { Text("S/ ${String.format(Locale.getDefault(), "%.2f", p.price)}") },
                 trailingContent = {
                     IconButton(onClick = { onSettingsChange(settings.copy(products = settings.products - p)) }) {
                         Icon(Icons.Default.Delete, null, tint = Color.Red)
