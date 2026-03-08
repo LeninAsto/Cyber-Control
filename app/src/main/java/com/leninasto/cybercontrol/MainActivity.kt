@@ -3,6 +3,8 @@ package com.leninasto.cybercontrol
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,13 +13,20 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -37,11 +46,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
@@ -56,6 +68,7 @@ import java.time.temporal.ChronoUnit
 import java.util.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.cos
+import kotlin.math.round
 import kotlin.math.sin
 
 // --- MODELOS DE DATOS ---
@@ -94,7 +107,8 @@ data class Cabin(
     val prepaidDurationMillis: Long = 0L,
     val prepaidPrice: Double = 0.0,
     val extras: List<ExtraItem> = emptyList(),
-    val notificationSent: Boolean = false
+    val notificationSent: Boolean = false,
+    val transferBalance: Double = 0.0
 )
 
 data class AppSettings(
@@ -117,13 +131,75 @@ data class AppSettings(
     val products: List<ExtraItem> = listOf(
         ExtraItem(name = "Gaseosa", price = 2.5),
         ExtraItem(name = "Galletas", price = 1.0)
-    )
+    ),
+    val roundingStep: Double = 0.10
 )
 
 enum class AppDestinations(val label: String, val icon: ImageVector) {
-    CABINS("Cabinas", Icons.Default.Home),
+    CABINS("Cabinas", Icons.Default.Computer),
     STATS("Ventas", Icons.AutoMirrored.Filled.List),
     SETTINGS("Ajustes", Icons.Default.Settings),
+    INFO("Info", Icons.Default.Info),
+}
+
+// --- UTILIDADES ---
+
+fun applyRounding(value: Double, step: Double): Double {
+    if (step <= 0.01) return value
+    return round(value / step) * step
+}
+
+fun formatTime(millis: Long): String {
+    val h = TimeUnit.MILLISECONDS.toHours(millis)
+    val m = TimeUnit.MILLISECONDS.toMinutes(millis) % 60
+    val s = TimeUnit.MILLISECONDS.toSeconds(millis) % 60
+    
+    return when {
+        h > 0 -> "${h}h ${m}m"
+        m >= 10 -> "${m}m"
+        m >= 1 -> String.format(Locale.getDefault(), "%d:%02d", m, s)
+        else -> s.toString()
+    }
+}
+
+fun formatClockTime(millis: Long): String {
+    if (millis == 0L) return "--:--"
+    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
+}
+
+fun formatDate(timestamp: Long): String {
+    return SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(timestamp))
+}
+
+fun isToday(timestamp: Long): Boolean {
+    val fmt = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    return fmt.format(Date(timestamp)) == fmt.format(Date())
+}
+
+fun getPriceGroupForCabin(cabinId: Int, settings: AppSettings): PriceGroup {
+    val specific = settings.priceGroups.filter { it.cabinRange != "all" }.find { group ->
+        val parts = group.cabinRange.split(",")
+        parts.any { p ->
+            if (p.contains("-")) {
+                val r = p.split("-")
+                val start = r[0].trim().toIntOrNull() ?: -1
+                val end = r[1].trim().toIntOrNull() ?: -1
+                cabinId in start..end
+            } else p.trim().toIntOrNull() == cabinId
+        }
+    }
+    return specific ?: settings.priceGroups.first { it.cabinRange == "all" }
+}
+
+fun sendNotification(context: Context, title: String, message: String) {
+    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val cid = "cyber_alerts"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        nm.createNotificationChannel(NotificationChannel(cid, "Alertas", NotificationManager.IMPORTANCE_HIGH))
+    }
+    val n = NotificationCompat.Builder(context, cid).setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle(title).setContentText(message).setPriority(NotificationCompat.PRIORITY_HIGH).build()
+    nm.notify(System.currentTimeMillis().toInt(), n)
 }
 
 // --- PERSISTENCIA ---
@@ -134,6 +210,7 @@ fun saveAppSettings(context: Context, settings: AppSettings) {
         put("cabinCount", settings.cabinCount)
         put("includeCabinZero", settings.includeCabinZero)
         put("closingTime", settings.closingTime)
+        put("roundingStep", settings.roundingStep)
         put("priceGroups", JSONArray().apply {
             settings.priceGroups.forEach { group ->
                 put(JSONObject().apply {
@@ -195,6 +272,7 @@ fun loadAppSettings(context: Context): AppSettings {
             cabinCount = json.optInt("cabinCount", 10),
             includeCabinZero = json.optBoolean("includeCabinZero", false),
             closingTime = json.optString("closingTime", "22:00"),
+            roundingStep = json.optDouble("roundingStep", 0.10),
             priceGroups = if (groups.isEmpty()) AppSettings().priceGroups else groups,
             products = if (prods.isEmpty()) AppSettings().products else prods
         )
@@ -228,59 +306,55 @@ fun loadSales(context: Context): List<Sale> {
     } catch (e: Exception) { emptyList() }
 }
 
-// --- UTILIDADES ---
-
-fun formatTime(millis: Long): String {
-    val h = TimeUnit.MILLISECONDS.toHours(millis)
-    val m = TimeUnit.MILLISECONDS.toMinutes(millis) % 60
-    val s = TimeUnit.MILLISECONDS.toSeconds(millis) % 60
-    
-    return when {
-        h > 0 -> "${h}h ${m}m"
-        m >= 10 -> "${m}m"
-        m >= 1 -> String.format(Locale.getDefault(), "%d:%02d", m, s)
-        else -> s.toString()
+fun saveCabins(context: Context, cabins: List<Cabin>) {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val array = JSONArray()
+    cabins.forEach { c ->
+        array.put(JSONObject().apply {
+            put("id", c.id); put("name", c.name); put("isOccupied", c.isOccupied)
+            put("isPaused", c.isPaused); put("mode", c.mode.name)
+            put("startTimeMillis", c.startTimeMillis); put("pausedTimeMillis", c.pausedTimeMillis)
+            put("totalPausedDuration", c.totalPausedDuration)
+            put("prepaidDurationMillis", c.prepaidDurationMillis)
+            put("prepaidPrice", c.prepaidPrice); put("notificationSent", c.notificationSent)
+            put("transferBalance", c.transferBalance)
+            val exArr = JSONArray()
+            c.extras.forEach { e -> exArr.put(JSONObject().apply { put("id", e.id); put("name", e.name); put("price", e.price) }) }
+            put("extras", exArr)
+        })
     }
+    prefs.edit().putString("cabins", array.toString()).apply()
 }
 
-fun formatClockTime(millis: Long): String {
-    if (millis == 0L) return "--:--"
-    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
-}
-
-fun formatDate(timestamp: Long): String {
-    return SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(Date(timestamp))
-}
-
-fun isToday(timestamp: Long): Boolean {
-    val fmt = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
-    return fmt.format(Date(timestamp)) == fmt.format(Date())
-}
-
-fun getPriceGroupForCabin(cabinId: Int, settings: AppSettings): PriceGroup {
-    val specific = settings.priceGroups.filter { it.cabinRange != "all" }.find { group ->
-        val parts = group.cabinRange.split(",")
-        parts.any { p ->
-            if (p.contains("-")) {
-                val r = p.split("-")
-                val start = r[0].trim().toIntOrNull() ?: -1
-                val end = r[1].trim().toIntOrNull() ?: -1
-                cabinId in start..end
-            } else p.trim().toIntOrNull() == cabinId
+fun loadCabins(context: Context): List<Cabin> {
+    val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
+    val jsonStr = prefs.getString("cabins", null) ?: return emptyList()
+    return try {
+        val array = JSONArray(jsonStr)
+        val list = mutableListOf<Cabin>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val extras = mutableListOf<ExtraItem>()
+            val exArr = obj.optJSONArray("extras")
+            if (exArr != null) {
+                for (j in 0 until exArr.length()) {
+                    val e = exArr.getJSONObject(j)
+                    extras.add(ExtraItem(e.getString("id"), e.getString("name"), e.getDouble("price")))
+                }
+            }
+            list.add(Cabin(
+                id = obj.getInt("id"), name = obj.getString("name"),
+                isOccupied = obj.getBoolean("isOccupied"), isPaused = obj.getBoolean("isPaused"),
+                mode = SessionMode.valueOf(obj.getString("mode")),
+                startTimeMillis = obj.getLong("startTimeMillis"), pausedTimeMillis = obj.getLong("pausedTimeMillis"),
+                totalPausedDuration = obj.getLong("totalPausedDuration"),
+                prepaidDurationMillis = obj.getLong("prepaidDurationMillis"), prepaidPrice = obj.getDouble("prepaidPrice"),
+                extras = extras, notificationSent = obj.optBoolean("notificationSent", false),
+                transferBalance = obj.optDouble("transferBalance", 0.0)
+            ))
         }
-    }
-    return specific ?: settings.priceGroups.first { it.cabinRange == "all" }
-}
-
-fun sendNotification(context: Context, title: String, message: String) {
-    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    val cid = "cyber_alerts"
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        nm.createNotificationChannel(NotificationChannel(cid, "Alertas", NotificationManager.IMPORTANCE_HIGH))
-    }
-    val n = NotificationCompat.Builder(context, cid).setSmallIcon(android.R.drawable.ic_dialog_info)
-        .setContentTitle(title).setContentText(message).setPriority(NotificationCompat.PRIORITY_HIGH).build()
-    nm.notify(System.currentTimeMillis().toInt(), n)
+        list
+    } catch (e: Exception) { emptyList() }
 }
 
 // --- COMPONENTE WAVY ---
@@ -299,26 +373,39 @@ fun CircularWavyProgressIndicator(
         animationSpec = infiniteRepeatable(animation = tween(2000, easing = LinearEasing)),
         label = "phase"
     )
+    
+    val rotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(animation = tween(4000, easing = LinearEasing)),
+        label = "rotation"
+    )
 
     Canvas(modifier = modifier) {
         val strokeWidth = 4.dp.toPx()
         val radius = (size.minDimension / 2) - strokeWidth
         val center = Offset(size.width / 2, size.height / 2)
         drawCircle(color = color.copy(alpha = 0.1f), radius = radius, style = Stroke(width = strokeWidth))
-        val path = Path()
-        val segments = 120
-        val sweepAngle = 360f * progress
-        for (i in 0..segments) {
-            val angleDeg = -90f + (sweepAngle * i / segments)
-            val angleRad = Math.toRadians(angleDeg.toDouble()).toFloat()
-            val waveAmplitude = if (isTimeUp) 6f else 3f
-            val wave = sin(i * 0.4f + phase * 6f) * waveAmplitude
-            val r = radius + wave
-            val x = center.x + r * cos(angleRad)
-            val y = center.y + r * sin(angleRad)
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        
+        rotate(if (isTimeUp) rotation else 0f) {
+            val path = Path()
+            val actualProgress = if (isTimeUp) 1f else progress.coerceIn(0.01f, 1f)
+            val sweepAngle = 360f * actualProgress
+            val segments = (sweepAngle * 1.5f).toInt().coerceAtLeast(40)
+            
+            for (i in 0..segments) {
+                val angleDeg = -90f + (sweepAngle * i / segments)
+                val angleRad = Math.toRadians(angleDeg.toDouble()).toFloat()
+                val waveAmplitude = if (isTimeUp) 6f else 3f
+                val wave = sin(angleDeg * 0.15f + phase * 6f) * waveAmplitude
+                
+                val r = radius + wave
+                val x = center.x + r * cos(angleRad)
+                val y = center.y + r * sin(angleRad)
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(path = path, color = if (isTimeUp) Color.Red else color, style = Stroke(width = strokeWidth, cap = StrokeCap.Round))
         }
-        drawPath(path = path, color = if (isTimeUp) Color.Red else color, style = Stroke(width = strokeWidth, cap = StrokeCap.Round))
     }
 }
 
@@ -340,17 +427,30 @@ fun CyberControlApp() {
     val cabins = remember { mutableStateListOf<Cabin>() }
     val sales = remember { mutableStateListOf<Sale>() }
 
-    LaunchedEffect(Unit) { sales.addAll(loadSales(context)) }
-    LaunchedEffect(sales.size) { saveSales(context, sales) }
+    // CARGA INICIAL
+    LaunchedEffect(Unit) {
+        val loadedSales = loadSales(context)
+        sales.clear()
+        sales.addAll(loadedSales)
+        val loaded = loadCabins(context)
+        if (loaded.isNotEmpty()) {
+            cabins.clear()
+            cabins.addAll(loaded)
+        }
+    }
 
+    // SINCRONIZACIÓN DE CABINAS
     LaunchedEffect(settings.cabinCount, settings.includeCabinZero) {
         val startId = if (settings.includeCabinZero) 0 else 1
-        val active = cabins.filter { it.isOccupied }.associateBy { it.id }
-        cabins.clear()
+        val activeMap = cabins.associateBy { it.id }
+        val newCabins = mutableListOf<Cabin>()
         for (i in 0 until settings.cabinCount) {
             val id = startId + i
-            cabins.add(active[id] ?: Cabin(id = id, name = "PC $id"))
+            newCabins.add(activeMap[id] ?: Cabin(id = id, name = "PC $id"))
         }
+        cabins.clear()
+        cabins.addAll(newCabins)
+        saveCabins(context, cabins)
     }
 
     NavigationSuiteScaffold(
@@ -368,9 +468,16 @@ fun CyberControlApp() {
         Scaffold(modifier = Modifier.fillMaxSize(), topBar = { ClosingTimeBar(settings.closingTime) }) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
                 when (currentDestination) {
-                    AppDestinations.CABINS -> CabinsScreen(cabins, settings) { sale -> sales.add(sale) }
+                    AppDestinations.CABINS -> CabinsScreen(cabins, settings, onSaleRecorded = { sale ->
+                        sales.add(sale)
+                        saveSales(context, sales)
+                    })
                     AppDestinations.STATS -> StatsScreen(sales)
-                    AppDestinations.SETTINGS -> SettingsScreen(settings, onSettingsChange = { settings = it; saveAppSettings(context, it) })
+                    AppDestinations.SETTINGS -> SettingsScreen(settings, onSettingsChange = { 
+                        settings = it
+                        saveAppSettings(context, it) 
+                    })
+                    AppDestinations.INFO -> InfoScreen()
                 }
             }
         }
@@ -395,19 +502,32 @@ fun ClosingTimeBar(closingTimeStr: String) {
 
 @Composable
 fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecorded: (Sale) -> Unit) {
+    val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Panel de Cabinas", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Panel de Cabinas", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            val occupiedCount = cabins.count { it.isOccupied }
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = CircleShape) {
+                Text("$occupiedCount/${cabins.size}", modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            }
+        }
         Spacer(modifier = Modifier.height(16.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
             items(cabins, key = { it.id }) { cabin ->
                 val group = remember(cabin.id, settings) { getPriceGroupForCabin(cabin.id, settings) }
-                CabinCard(cabin, group, settings, onUpdate = { updated ->
+                CabinCard(cabin, group, settings, cabins, onUpdate = { updated ->
                     val idx = cabins.indexOfFirst { it.id == cabin.id }
-                    if (idx != -1) cabins[idx] = updated
+                    if (idx != -1) {
+                        cabins[idx] = updated
+                        saveCabins(context, cabins)
+                    }
                 }, onStop = { sale ->
                     onSaleRecorded(sale)
                     val idx = cabins.indexOfFirst { it.id == cabin.id }
-                    if (idx != -1) cabins[idx] = Cabin(id = cabin.id, name = cabin.name)
+                    if (idx != -1) {
+                        cabins[idx] = Cabin(id = cabin.id, name = cabin.name)
+                        saveCabins(context, cabins)
+                    }
                 })
             }
         }
@@ -415,16 +535,20 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
 }
 
 @Composable
-fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: (Cabin) -> Unit, onStop: (Sale) -> Unit) {
+fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins: List<Cabin>, onUpdate: (Cabin) -> Unit, onStop: (Sale) -> Unit) {
     val context = LocalContext.current
     var currentTimeMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showStartDialog by remember { mutableStateOf(false) }
     var showAddTimeDialog by remember { mutableStateOf(false) }
     var showExtraDialog by remember { mutableStateOf(false) }
     var showSummaryDialog by remember { mutableStateOf(false) }
+    var showTransferDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(cabin.isOccupied, cabin.isPaused) {
-        while (cabin.isOccupied && !cabin.isPaused) { delay(1000); currentTimeMillis = System.currentTimeMillis() }
+        while (cabin.isOccupied && !cabin.isPaused) { 
+            delay(1000)
+            currentTimeMillis = System.currentTimeMillis() 
+        }
     }
 
     val elapsed = if (cabin.isOccupied) {
@@ -432,8 +556,22 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
         else currentTimeMillis - cabin.startTimeMillis - cabin.totalPausedDuration
     } else 0L
 
-    val isTimeUp = cabin.mode == SessionMode.PREPAID && elapsed >= cabin.prepaidDurationMillis
-    val timeRem = if (cabin.mode == SessionMode.PREPAID) (cabin.prepaidDurationMillis - elapsed).coerceAtLeast(0L) else 0L
+    val millisUntilClosing = remember(settings.closingTime, currentTimeMillis) {
+        val now = LocalTime.now()
+        val closing = try { LocalTime.parse(settings.closingTime, DateTimeFormatter.ofPattern("HH:mm")) } catch (e: Exception) { LocalTime.of(22, 0) }
+        val diff = ChronoUnit.MILLIS.between(now, closing)
+        if (diff > 0) diff else if (diff < 0) -1L else 0L
+    }
+    val isClosingSoon = millisUntilClosing in 1..3600000 
+    val isAutoCountdown = cabin.isOccupied && cabin.mode == SessionMode.FREE && isClosingSoon
+
+    val isTimeUp = (cabin.mode == SessionMode.PREPAID && elapsed >= cabin.prepaidDurationMillis) || (isAutoCountdown && millisUntilClosing <= 0)
+    val timeRem = if (cabin.mode == SessionMode.PREPAID) (cabin.prepaidDurationMillis - elapsed).coerceAtLeast(0L) else if (isAutoCountdown) millisUntilClosing else 0L
+    val overdueTime = if (isTimeUp) {
+        if (cabin.mode == SessionMode.PREPAID) elapsed - cabin.prepaidDurationMillis 
+        else if (isAutoCountdown) -millisUntilClosing
+        else 0L
+    } else 0L
 
     LaunchedEffect(isTimeUp) {
         if (isTimeUp && !cabin.notificationSent) {
@@ -442,11 +580,15 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
         }
     }
 
-    val cost = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidPrice + cabin.extras.sumOf { it.price }
-    else (elapsed / 3600000.0) * group.pricePerHour + cabin.extras.sumOf { it.price }
+    val baseCost = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidPrice
+    else (elapsed / 3600000.0) * group.pricePerHour
+    
+    val totalAccumulated = baseCost + cabin.extras.sumOf { it.price } + cabin.transferBalance
+    val finalCost = applyRounding(totalAccumulated, settings.roundingStep)
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = when {
                 isTimeUp -> MaterialTheme.colorScheme.errorContainer
@@ -456,80 +598,87 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
             }
         )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            // Fila Superior: Identidad y Costo
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        Icons.Default.Computer, null, modifier = Modifier.size(24.dp),
+                        Icons.Default.Computer, null, modifier = Modifier.size(28.dp),
                         tint = when { cabin.isPaused -> Color(0xFFFFC107); cabin.isOccupied -> Color.Green; else -> Color.Gray }
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(cabin.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(12.dp))
+                    Text(cabin.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
                 }
                 if (cabin.isOccupied) {
                     Text(
-                        text = "S/ ${String.format(Locale.getDefault(), "%.2f", cost)}",
-                        style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black,
+                        text = "S/ ${String.format(Locale.getDefault(), "%.2f", finalCost)}",
+                        style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black,
                         color = if (isTimeUp) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                     )
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // Cuerpo Central: Tiempo y Progreso (Aquí es donde estaba el error de ancho)
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (cabin.isOccupied && cabin.mode == SessionMode.PREPAID) {
-                    val progressValue = (timeRem.toFloat() / (if (cabin.prepaidDurationMillis > 0) cabin.prepaidDurationMillis.toFloat() else 1f)).coerceIn(0f, 1f)
-                    CircularWavyProgressIndicator(progress = progressValue, isTimeUp = isTimeUp, modifier = Modifier.size(44.dp))
-                    Spacer(Modifier.width(12.dp))
+                if (cabin.isOccupied && (cabin.mode == SessionMode.PREPAID || isAutoCountdown)) {
+                    val totalForProgress = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidDurationMillis.toFloat() else 3600000f
+                    val progressValue = (timeRem.toFloat() / (if (totalForProgress > 0) totalForProgress else 1f)).coerceIn(0f, 1f)
+                    CircularWavyProgressIndicator(progress = progressValue, isTimeUp = isTimeUp, modifier = Modifier.size(56.dp))
+                    Spacer(Modifier.width(16.dp))
                 }
                 
                 if (cabin.isOccupied) {
+                    val timeText = when {
+                        isTimeUp -> "+${formatTime(overdueTime)}"
+                        cabin.mode == SessionMode.PREPAID || isAutoCountdown -> formatTime(timeRem)
+                        else -> formatTime(elapsed)
+                    }
                     Text(
-                        text = if (cabin.mode == SessionMode.PREPAID) formatTime(timeRem) else formatTime(elapsed),
-                        style = MaterialTheme.typography.displaySmall.copy(fontSize = 32.sp),
+                        text = timeText,
+                        style = MaterialTheme.typography.displayMedium.copy(fontSize = 40.sp),
                         fontWeight = FontWeight.Black,
-                        color = if (isTimeUp) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                        color = if (isTimeUp) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 } else {
-                    Text("Disponible", style = MaterialTheme.typography.headlineSmall, color = Color.Gray.copy(alpha = 0.5f))
+                    Text("Disponible", style = MaterialTheme.typography.headlineMedium, color = Color.Gray.copy(alpha = 0.4f), fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
 
-            // Fila Inferior: Info de Horas y Acciones
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
                     if (cabin.isOccupied) {
-                        Text("Inicio: ${formatClockTime(cabin.startTimeMillis)}", style = MaterialTheme.typography.bodySmall)
-                        if (cabin.mode == SessionMode.PREPAID) {
-                            val endTime = cabin.startTimeMillis + cabin.prepaidDurationMillis + cabin.totalPausedDuration
-                            Text("Fin: ${formatClockTime(endTime)}", style = MaterialTheme.typography.bodySmall)
+                        Text("Inició: ${formatClockTime(cabin.startTimeMillis)}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                        if (cabin.mode == SessionMode.PREPAID || isAutoCountdown) {
+                            val duration = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidDurationMillis else (millisUntilClosing + elapsed).coerceAtLeast(0L)
+                            val endTime = cabin.startTimeMillis + duration + cabin.totalPausedDuration
+                            Text("Termina: ${formatClockTime(endTime)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                         }
                     }
-                    Text("${group.name}: S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("${group.name} • S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (!cabin.isOccupied) {
-                        Button(onClick = { showStartDialog = true }) { Text("INICIAR") }
+                        Button(onClick = { showStartDialog = true }, shape = RoundedCornerShape(12.dp)) { Text("INICIAR", fontWeight = FontWeight.Bold) }
                     } else {
-                        IconButton(onClick = { showExtraDialog = true }) { Icon(Icons.Default.ShoppingCart, null, modifier = Modifier.size(22.dp)) }
+                        FilledTonalIconButton(onClick = { showExtraDialog = true }) { Icon(Icons.Default.ShoppingCart, null) }
                         if (cabin.mode == SessionMode.PREPAID) {
-                            IconButton(onClick = { showAddTimeDialog = true }) { Icon(Icons.Default.AddAlarm, null, modifier = Modifier.size(22.dp)) }
+                            FilledTonalIconButton(onClick = { showAddTimeDialog = true }) { Icon(Icons.Default.AddAlarm, null) }
                         }
-                        IconButton(onClick = {
+                        FilledTonalIconButton(onClick = { showTransferDialog = true }) { Icon(Icons.Default.SyncAlt, null) }
+                        FilledTonalIconButton(onClick = {
                             if (cabin.isPaused) {
                                 val pauseEnd = System.currentTimeMillis()
                                 onUpdate(cabin.copy(isPaused = false, totalPausedDuration = cabin.totalPausedDuration + (pauseEnd - cabin.pausedTimeMillis)))
                             } else {
                                 onUpdate(cabin.copy(isPaused = true, pausedTimeMillis = System.currentTimeMillis()))
                             }
-                        }) { Icon(if (cabin.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null, modifier = Modifier.size(22.dp)) }
-                        IconButton(onClick = { showSummaryDialog = true }) { Icon(Icons.Default.Close, null, tint = Color.Red, modifier = Modifier.size(22.dp)) }
+                        }) { Icon(if (cabin.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null) }
+                        IconButton(onClick = { showSummaryDialog = true }) { Icon(Icons.Default.Close, null, tint = Color.Red, modifier = Modifier.size(28.dp)) }
                     }
                 }
             }
@@ -539,30 +688,170 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, onUpdate: 
     if (showStartDialog) StartSessionDialog(group, { showStartDialog = false }, { m, d, p -> onUpdate(cabin.copy(isOccupied = true, mode = m, prepaidDurationMillis = d, prepaidPrice = p, startTimeMillis = System.currentTimeMillis())); showStartDialog = false })
     if (showAddTimeDialog) StartSessionDialog(group, { showAddTimeDialog = false }, { _, d, p -> onUpdate(cabin.copy(prepaidDurationMillis = cabin.prepaidDurationMillis + d, prepaidPrice = cabin.prepaidPrice + p, notificationSent = false)); showAddTimeDialog = false }, isAdding = true)
     if (showExtraDialog) AddExtraDialog(settings.products, { showExtraDialog = false }, { onUpdate(cabin.copy(extras = cabin.extras + it)); showExtraDialog = false })
-    if (showSummaryDialog) SummaryDialog(cabin, cost, { showSummaryDialog = false }, { method -> onStop(Sale(cabinName = cabin.name, amount = cost, paymentMethod = method, startTime = cabin.startTimeMillis, endTime = System.currentTimeMillis())); showSummaryDialog = false })
+    if (showSummaryDialog) SummaryDialog(
+        cabin = cabin, 
+        cost = finalCost, 
+        allCabins = allCabins,
+        onDismiss = { showSummaryDialog = false }, 
+        onConfirm = { method -> onStop(Sale(cabinName = cabin.name, amount = finalCost, paymentMethod = method, startTime = cabin.startTimeMillis, endTime = System.currentTimeMillis())); showSummaryDialog = false },
+        onAddToOther = { targetId ->
+            val targetIdx = allCabins.indexOfFirst { it.id == targetId }
+            if (targetIdx != -1) {
+                val targetCabin = allCabins[targetIdx]
+                val updatedTarget = targetCabin.copy(transferBalance = targetCabin.transferBalance + finalCost)
+                (allCabins as? MutableList<Cabin>)?.let { list ->
+                    list[targetIdx] = updatedTarget
+                    saveCabins(context, list)
+                }
+                onUpdate(Cabin(id = cabin.id, name = cabin.name))
+            }
+            showSummaryDialog = false
+        }
+    )
+    
+    if (showTransferDialog) TransferDialog(
+        currentCabin = cabin, 
+        currentCost = finalCost,
+        allCabins = allCabins, 
+        settings = settings,
+        onDismiss = { showTransferDialog = false }, 
+        onConfirm = { targetId ->
+            val targetIdx = allCabins.indexOfFirst { it.id == targetId }
+            if (targetIdx != -1) {
+                val transferredCabin = cabin.copy(
+                    id = targetId, 
+                    name = allCabins[targetIdx].name,
+                    transferBalance = finalCost
+                ).let { if (it.mode == SessionMode.FREE) it.copy(startTimeMillis = System.currentTimeMillis(), totalPausedDuration = 0) else it }
+                
+                onUpdate(Cabin(id = cabin.id, name = cabin.name))
+                (allCabins as? MutableList<Cabin>)?.let { list ->
+                    list[targetIdx] = transferredCabin
+                    saveCabins(context, list)
+                }
+            }
+            showTransferDialog = false
+        }
+    )
 }
 
 @Composable
-fun SummaryDialog(cabin: Cabin, cost: Double, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+fun TransferDialog(currentCabin: Cabin, currentCost: Double, allCabins: List<Cabin>, settings: AppSettings, onDismiss: () -> Unit, onConfirm: (Int) -> Unit) {
+    var selectedTargetId by remember { mutableStateOf(-1) }
+    val freeCabins = allCabins.filter { !it.isOccupied }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Cambio de PC") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Mover sesión de ${currentCabin.name} a:")
+                if (freeCabins.isEmpty()) {
+                    Text("No hay cabinas disponibles.", color = Color.Red)
+                } else {
+                    LazyVerticalGrid(columns = GridCells.Adaptive(64.dp), modifier = Modifier.heightIn(max = 200.dp)) {
+                        items(freeCabins) { target ->
+                            val targetGroup = getPriceGroupForCabin(target.id, settings)
+                            val currentGroup = getPriceGroupForCabin(currentCabin.id, settings)
+                            val isDifferentPrice = targetGroup.id != currentGroup.id
+                            
+                            Box(
+                                modifier = Modifier
+                                    .padding(4.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (selectedTargetId == target.id) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable { selectedTargetId = target.id }
+                                    .padding(12.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(target.name, fontWeight = FontWeight.Bold)
+                                    if (isDifferentPrice) Icon(Icons.Default.Warning, null, modifier = Modifier.size(12.dp), tint = Color(0xFFFFA500))
+                                }
+                            }
+                        }
+                    }
+                    if (selectedTargetId != -1) {
+                        val targetGroup = getPriceGroupForCabin(selectedTargetId, settings)
+                        val currentGroup = getPriceGroupForCabin(currentCabin.id, settings)
+                        if (targetGroup.id != currentGroup.id) {
+                            Text("⚠️ Aviso: Diferente rango de precios. Se transferirá el saldo de S/ ${String.format("%.2f", currentCost)} a la nueva PC.", style = MaterialTheme.typography.bodySmall, color = Color(0xFFFFA500))
+                        } else {
+                            Text("Se moverá el saldo de S/ ${String.format("%.2f", currentCost)}.", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(selectedTargetId) }, enabled = selectedTargetId != -1) { Text("MOVER PC") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("CANCELAR") } }
+    )
+}
+
+@Composable
+fun SummaryDialog(cabin: Cabin, cost: Double, allCabins: List<Cabin>, onDismiss: () -> Unit, onConfirm: (String) -> Unit, onAddToOther: (Int) -> Unit) {
     var selectedMethod by remember { mutableStateOf("Efectivo") }
+    var showAddToOtherDialog by remember { mutableStateOf(false) }
+
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Cerrar Cuenta") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Sesión: ${cabin.name}", fontWeight = FontWeight.Bold)
             Text("Inicio: ${formatClockTime(cabin.startTimeMillis)}")
             Text("Fin: ${formatClockTime(System.currentTimeMillis())}")
             HorizontalDivider()
-            Text(text = String.format(Locale.getDefault(), "Total: S/ %.2f", cost), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                IconButton(onClick = { showAddToOtherDialog = true }) {
+                    Icon(Icons.Default.AddCircleOutline, "Añadir a otra persona", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(text = String.format(Locale.getDefault(), "Total: S/ %.2f", cost), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    if (cabin.transferBalance > 0) Text("Saldo previo: S/ ${String.format("%.2f", cabin.transferBalance)}", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
             if (cabin.extras.isNotEmpty()) {
-                Text("Extras:", fontWeight = FontWeight.Bold)
+                Text("Consumos:", fontWeight = FontWeight.Bold)
                 cabin.extras.forEach { Text("- ${it.name}: S/ ${String.format("%.2f", it.price)}") }
             }
-            Text("Pago por:")
+            Text("Forma de pago:")
             Row(Modifier.selectableGroup()) {
                 ModeOption("Efectivo", selectedMethod == "Efectivo") { selectedMethod = "Efectivo" }
                 ModeOption("Yape", selectedMethod == "Yape") { selectedMethod = "Yape" }
             }
         }
-    }, confirmButton = { Button(onClick = { onConfirm(selectedMethod) }) { Text("PAGAR") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("CANCELAR") } })
+    }, confirmButton = { Button(onClick = { onConfirm(selectedMethod) }) { Text("COBRAR") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("CANCELAR") } })
+
+    if (showAddToOtherDialog) {
+        val otherOccupied = allCabins.filter { it.isOccupied && it.id != cabin.id }
+        AlertDialog(
+            onDismissRequest = { showAddToOtherDialog = false },
+            title = { Text("Sumar deuda a...") },
+            text = {
+                Column {
+                    if (otherOccupied.isEmpty()) {
+                        Text("No hay otras cabinas ocupadas actualmente.")
+                    } else {
+                        LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                            items(otherOccupied) { target ->
+                                ListItem(
+                                    headlineContent = { Text(target.name, fontWeight = FontWeight.Bold) },
+                                    supportingContent = { Text("Sesión activa") },
+                                    leadingContent = { Icon(Icons.Default.AccountBalanceWallet, null) },
+                                    modifier = Modifier.clickable { onAddToOther(target.id) }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showAddToOtherDialog = false }) { Text("CANCELAR") } }
+        )
+    }
 }
 
 @Composable
@@ -577,18 +866,18 @@ fun StatsScreen(sales: MutableList<Sale>) {
                 var expanded by remember { mutableStateOf(isToday) }
                 val totalEfectivo = dailySales.filter { it.paymentMethod == "Efectivo" }.sumOf { it.amount }
                 val totalYape = dailySales.filter { it.paymentMethod == "Yape" }.sumOf { it.amount }
-                Card(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }) {
+                Card(modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }, shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.padding(16.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(if (isToday) "HOY ($date)" else date, fontWeight = FontWeight.Bold)
                             Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
                         }
-                        Text(text = String.format(Locale.getDefault(), "Total Día: S/ %.2f", totalEfectivo + totalYape), style = MaterialTheme.typography.bodySmall)
+                        Text(text = String.format(Locale.getDefault(), "Total: S/ %.2f", totalEfectivo + totalYape), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         if (expanded) {
                             HorizontalDivider(Modifier.padding(vertical = 8.dp))
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(text = String.format(Locale.getDefault(), "Efectivo: S/ %.2f", totalEfectivo), color = MaterialTheme.colorScheme.primary)
-                                Text(text = String.format(Locale.getDefault(), "Yape: S/ %.2f", totalYape), color = Color(0xFF8E44AD))
+                                Text(text = "Efectivo: S/ ${String.format("%.2f", totalEfectivo)}", style = MaterialTheme.typography.bodySmall)
+                                Text(text = "Yape: S/ ${String.format("%.2f", totalYape)}", style = MaterialTheme.typography.bodySmall, color = Color(0xFF8E44AD))
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             dailySales.forEach { sale ->
@@ -693,10 +982,10 @@ fun ModeOption(label: String, selected: Boolean, onClick: () -> Unit) {
         modifier = Modifier
             .padding(end = 8.dp)
             .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
-            .clip(MaterialTheme.shapes.small),
+            .clip(RoundedCornerShape(12.dp)),
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
     ) {
-        Text(label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        Text(label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), fontWeight = FontWeight.Bold)
     }
 }
 
@@ -706,63 +995,80 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
     var showProductDialog by remember { mutableStateOf<ExtraItem?>(null) }
     var editingGroupPresets by remember { mutableStateOf<PriceGroup?>(null) }
 
-    Column(Modifier.padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-        Text("Configuración", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        OutlinedTextField(value = settings.cabinCount.toString(), onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(cabinCount = n)) } }, label = { Text("Número de Cabinas") }, modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Incluir Cabina 0", modifier = Modifier.weight(1f))
-            Switch(checked = settings.includeCabinZero, onCheckedChange = { onSettingsChange(settings.copy(includeCabinZero = it)) })
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Text("Configuración", modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+        
+        SettingsSection(title = "General", icon = Icons.Default.Tune) {
+            SettingsTextField(value = settings.cabinCount.toString(), onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(cabinCount = n)) } }, label = "Número de Cabinas", keyboardType = KeyboardType.Number)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Text("Incluir Cabina 0", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                Switch(checked = settings.includeCabinZero, onCheckedChange = { onSettingsChange(settings.copy(includeCabinZero = it)) })
+            }
+            SettingsTextField(value = settings.closingTime, onValueChange = { onSettingsChange(settings.copy(closingTime = it)) }, label = "Hora Cierre (HH:mm)")
+            
+            Spacer(Modifier.height(8.dp))
+            Text("Redondeo de cobro", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            val roundingOptions = listOf(0.01 to "Céntimos", 0.05 to "0.05", 0.10 to "0.10", 0.50 to "0.50")
+            Row(Modifier.selectableGroup().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
+                roundingOptions.forEach { (step, label) ->
+                    val selected = settings.roundingStep == step
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSettingsChange(settings.copy(roundingStep = step)) },
+                        label = { Text(label) },
+                        modifier = Modifier.padding(end = 8.dp),
+                        shape = CircleShape
+                    )
+                }
+            }
         }
-        OutlinedTextField(value = settings.closingTime, onValueChange = { onSettingsChange(settings.copy(closingTime = it)) }, label = { Text("Hora Cierre (HH:mm)") }, modifier = Modifier.fillMaxWidth())
 
-        Spacer(Modifier.height(24.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Zonas de Precios", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            IconButton(onClick = { showAddGroup = true }) { Icon(Icons.Default.Add, null) }
-        }
-        settings.priceGroups.forEach { group ->
-            ListItem(
-                headlineContent = { Text("${group.name} (${group.cabinRange})") },
-                supportingContent = { Text("S/ ${String.format(Locale.getDefault(), "%.2f", group.pricePerHour)}/h | ${group.presets.size} presets") },
-                trailingContent = {
-                    Row {
-                        IconButton(onClick = { editingGroupPresets = group }) { Icon(Icons.Default.Settings, null) }
-                        if (group.cabinRange != "all") {
-                            IconButton(onClick = { onSettingsChange(settings.copy(priceGroups = settings.priceGroups - group)) }) {
-                                Icon(Icons.Default.Delete, null, tint = Color.Red)
+        SettingsSection(title = "Zonas de Precios", icon = Icons.Default.Sell, action = { IconButton(onClick = { showAddGroup = true }) { Icon(Icons.Default.AddCircle, null, tint = MaterialTheme.colorScheme.primary) } }) {
+            settings.priceGroups.forEach { group ->
+                ListItem(
+                    headlineContent = { Text(group.name, fontWeight = FontWeight.Bold) },
+                    supportingContent = { Text("Rango: ${group.cabinRange} • S/ ${String.format("%.2f", group.pricePerHour)}/h") },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { editingGroupPresets = group }) { Icon(Icons.Default.Settings, null) }
+                            if (group.cabinRange != "all") {
+                                IconButton(onClick = { onSettingsChange(settings.copy(priceGroups = settings.priceGroups - group)) }) {
+                                    Icon(Icons.Default.Delete, null, tint = Color.Red)
+                                }
                             }
                         }
-                    }
-                }
-            )
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+            }
         }
 
-        Spacer(Modifier.height(24.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Productos / Snacks", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            IconButton(onClick = { showProductDialog = ExtraItem(name = "", price = 0.0) }) { Icon(Icons.Default.Add, null) }
+        SettingsSection(title = "Productos / Snacks", icon = Icons.Default.LocalCafe, action = { IconButton(onClick = { showProductDialog = ExtraItem(name = "", price = 0.0) }) { Icon(Icons.Default.AddCircle, null, tint = MaterialTheme.colorScheme.primary) } }) {
+            settings.products.forEach { p ->
+                ListItem(
+                    modifier = Modifier.clickable { showProductDialog = p },
+                    headlineContent = { Text(p.name, fontWeight = FontWeight.Bold) },
+                    supportingContent = { Text("S/ ${String.format("%.2f", p.price)}") },
+                    trailingContent = {
+                        IconButton(onClick = { onSettingsChange(settings.copy(products = settings.products - p)) }) {
+                            Icon(Icons.Default.Delete, null, tint = Color.Red)
+                        }
+                    },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
+            }
         }
-        settings.products.forEach { p ->
-            ListItem(
-                modifier = Modifier.clickable { showProductDialog = p },
-                headlineContent = { Text(p.name) },
-                supportingContent = { Text("S/ ${String.format(Locale.getDefault(), "%.2f", p.price)}") },
-                trailingContent = {
-                    IconButton(onClick = { onSettingsChange(settings.copy(products = settings.products - p)) }) {
-                        Icon(Icons.Default.Delete, null, tint = Color.Red)
-                    }
-                }
-            )
-        }
+        Spacer(Modifier.height(100.dp))
     }
 
+    // DIALOGS
     if (showAddGroup) {
         var n by remember { mutableStateOf("") }; var r by remember { mutableStateOf("") }; var p by remember { mutableStateOf("") }
         AlertDialog(onDismissRequest = { showAddGroup = false }, title = { Text("Nueva Zona") }, text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = n, onValueChange = { n = it }, label = { Text("Nombre") })
-                OutlinedTextField(value = r, onValueChange = { r = it }, label = { Text("Rango (ej. 1-3)") })
-                OutlinedTextField(value = p, onValueChange = { p = it }, label = { Text("Precio/h") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(value = n, onValueChange = { n = it }, label = { Text("Nombre") }, shape = RoundedCornerShape(12.dp))
+                OutlinedTextField(value = r, onValueChange = { r = it }, label = { Text("Rango (ej. 1-3)") }, shape = RoundedCornerShape(12.dp))
+                OutlinedTextField(value = p, onValueChange = { p = it }, label = { Text("Precio/h") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), shape = RoundedCornerShape(12.dp))
             }
         }, confirmButton = {
             Button(onClick = {
@@ -782,12 +1088,12 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
         var tempPriceH by remember { mutableStateOf(group.pricePerHour.toString()) }
         AlertDialog(onDismissRequest = { editingGroupPresets = null }, title = { Text("Ajustes: ${group.name}") }, text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = tempPriceH, onValueChange = { tempPriceH = it }, label = { Text("Precio Hora Base") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(value = tempPriceH, onValueChange = { tempPriceH = it }, label = { Text("Precio Hora Base") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), shape = RoundedCornerShape(12.dp))
                 Text("Preajustes Prepago:", fontWeight = FontWeight.Bold)
                 tempPresets.forEachIndexed { index, preset ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(preset.label, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = preset.price.toString(), onValueChange = { val p = it.toDoubleOrNull() ?: 0.0; tempPresets = tempPresets.toMutableList().apply { set(index, preset.copy(price = p)) } }, modifier = Modifier.width(80.dp), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                        OutlinedTextField(value = preset.price.toString(), onValueChange = { val p = it.toDoubleOrNull() ?: 0.0; tempPresets = tempPresets.toMutableList().apply { set(index, preset.copy(price = p)) } }, modifier = Modifier.width(90.dp), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), shape = RoundedCornerShape(12.dp))
                     }
                 }
             }
@@ -807,8 +1113,8 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
         var priceStr by remember { mutableStateOf(if(editing.price > 0) editing.price.toString() else "") }
         AlertDialog(onDismissRequest = { showProductDialog = null }, title = { Text(if(editing.name.isEmpty()) "Nuevo Producto" else "Editar Producto") }, text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") })
-                OutlinedTextField(value = priceStr, onValueChange = { priceStr = it }, label = { Text("Precio") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, shape = RoundedCornerShape(12.dp))
+                OutlinedTextField(value = priceStr, onValueChange = { priceStr = it }, label = { Text("Precio") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), shape = RoundedCornerShape(12.dp))
             }
         }, confirmButton = {
             Button(onClick = {
@@ -821,4 +1127,116 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
             }) { Text("Guardar") }
         }, dismissButton = { TextButton(onClick = { showProductDialog = null }) { Text("Cancelar") } })
     }
+}
+
+@Composable
+fun InfoScreen() {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(
+            modifier = Modifier.size(120.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            shape = CircleShape
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Coffee, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        
+        Spacer(Modifier.height(24.dp))
+        Text("Cyber Control", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
+        Text("Versión 1.0", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+        
+        Spacer(Modifier.height(32.dp))
+        
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        ) {
+            Column(modifier = Modifier.padding(24.dp)) {
+                Text("Desarrollo", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("Aplicación diseñada para la gestión eficiente de centros de computación y cybers.", textAlign = TextAlign.Justify)
+                
+                Spacer(Modifier.height(16.dp))
+                Text("Características principales:", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                Text("• Control de tiempo real con persistencia", style = MaterialTheme.typography.bodySmall)
+                Text("• Gestión de múltiples zonas de precio", style = MaterialTheme.typography.bodySmall)
+                Text("• Sistema de redondeo inteligente", style = MaterialTheme.typography.bodySmall)
+                Text("• Registro de ventas y consumos", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        
+        Spacer(Modifier.height(32.dp))
+        
+        Button(
+            onClick = { uriHandler.openUri("https://github.com/LeninAsto/Cyber-Control") },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            contentPadding = PaddingValues(16.dp)
+        ) {
+            Icon(Icons.Default.Code, null)
+            Spacer(Modifier.width(12.dp))
+            Text("Ver código en GitHub", fontWeight = FontWeight.Bold)
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        
+        OutlinedButton(
+            onClick = { uriHandler.openUri("https://buymeacoffee.com/lenin_anonimo_of") },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            contentPadding = PaddingValues(16.dp)
+        ) {
+            Text("Buy me a Coffe!", fontWeight = FontWeight.Bold)
+        }
+        
+        Spacer(Modifier.height(48.dp))
+        Text("© 2026 Lenin Asto", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+    }
+}
+
+@Composable
+fun SettingsSection(title: String, icon: ImageVector, action: @Composable (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp))
+    ) {
+        Column(modifier = Modifier.padding(24.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                action?.invoke()
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+fun SettingsTextField(value: String, onValueChange: (String) -> Unit, label: String, keyboardType: KeyboardType = KeyboardType.Text) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        shape = RoundedCornerShape(16.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+        )
+    )
 }
