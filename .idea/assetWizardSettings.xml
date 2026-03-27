@@ -89,7 +89,7 @@
                                           <PersistentState>
                                             <option name="values">
                                               <map>
-                                                <entry key="imagePath" value="C:\Users\USUARIO\Desktop\android\res\mipmap-xxxhdpi\ic_launcher_background.png" />
+                                                <entry key="imagePath" value="C:\Users\USUARIO\Desktop" />
                                                 <entry key="scalingPercent" value="103" />
                                               </map>
                                             </option>
@@ -147,11 +147,58 @@
                                           </PersistentState>
                                         </value>
                                       </entry>
+                                      <entry key="monochromeClipArt">
+                                        <value>
+                                          <PersistentState>
+                                            <option name="values">
+                                              <map>
+                                                <entry key="imagePath" value="C:\Users\USUARIO\AppData\Local\Temp\ic_android_black_24dp.xml" />
+                                              </map>
+                                            </option>
+                                          </PersistentState>
+                                        </value>
+                                      </entry>
+                                      <entry key="monochromeImage">
+                                        <value>
+                                          <PersistentState>
+                                            <option name="values">
+                                              <map>
+                                                <entry key="color" value="000000" />
+                                              </map>
+                                            </option>
+                                          </PersistentState>
+                                        </value>
+                                      </entry>
+                                      <entry key="monochromeText">
+                                        <value>
+                                          <PersistentState>
+                                            <option name="values">
+                                              <map>
+                                                <entry key="color" value="000000" />
+                                              </map>
+                                            </option>
+                                          </PersistentState>
+                                        </value>
+                                      </entry>
+                                      <entry key="monochromeTextAsset">
+                                        <value>
+                                          <PersistentState>
+                                            <option name="values">
+                                              <map>
+                                                <entry key="color" value="000000" />
+                                              </map>
+                                            </option>
+                                          </PersistentState>
+                                        </value>
+                                      </entry>
                                     </map>
                                   </option>
                                   <option name="values">
                                     <map>
-                                      <entry key="backgroundColor" value="32465a" />
+                                      <entry key="backgroundAssetType" value="COLOR" />
+                                      <entry key="backgroundColor" value="160d3c" />
+                                      <entry key="foregroundLayerName" value="ic_launcher_monocrome" />
+                                      <entry key="outputName" value="ic_launcher_monocrome_icon" />
                                       <entry key="showSafeZone" value="false" />
                                     </map>
                                   </option>
