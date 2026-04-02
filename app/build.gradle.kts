@@ -37,6 +37,15 @@ android {
     buildFeatures {
         compose = true
     }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("x86_64", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
 }
 
 dependencies {
