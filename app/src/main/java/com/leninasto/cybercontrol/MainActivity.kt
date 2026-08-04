@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -408,6 +410,37 @@ fun createYapeProofUri(context: Context): Uri {
     if (!dir.exists()) dir.mkdirs()
     val file = File(dir, "yape_${System.currentTimeMillis()}.jpg")
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+fun loadBitmapRespectingExif(context: Context, uri: Uri): Bitmap? {
+    val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return null
+    val orientation = context.contentResolver.openInputStream(uri)?.use {
+        ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    } ?: ExifInterface.ORIENTATION_NORMAL
+
+    val matrix = Matrix()
+    when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.postRotate(90f)
+            matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.postRotate(270f)
+            matrix.postScale(-1f, 1f)
+        }
+        else -> return bitmap
+    }
+
+    return runCatching {
+        Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }.getOrElse {
+        bitmap
+    }
 }
 
 fun getPriceGroupForCabin(cabinId: Int, settings: AppSettings): PriceGroup {
@@ -829,7 +862,7 @@ fun CheckoutTicketScreen(
     val proofBitmap = remember(proofUri) {
         proofUri?.let { uri ->
             runCatching {
-                context.contentResolver.openInputStream(Uri.parse(uri))?.use { BitmapFactory.decodeStream(it) }
+                loadBitmapRespectingExif(context, Uri.parse(uri))
             }.getOrNull()
         }
     }
@@ -2171,7 +2204,7 @@ fun InfoScreen() {
 
         Spacer(Modifier.height(24.dp))
         Text("Cyber Control", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
-        Text("Versión 1.2.0", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+        Text("Versión 1.2.1", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
 
         Spacer(Modifier.height(32.dp))
 
