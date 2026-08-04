@@ -7,6 +7,8 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -49,10 +52,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -75,7 +80,6 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.*
 import java.util.concurrent.TimeUnit
-import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.round
 import kotlin.math.sin
@@ -153,7 +157,6 @@ data class AppSettings(
         ExtraItem(name = "Galletas", price = 1.0)
     ),
     val roundingStep: Double = 0.10,
-    val billingStepMinutes: Int = 10,
     val minimumBillableMinutes: Int = 0,
     val usePresetPriceInterpolation: Boolean = false
 )
@@ -173,9 +176,7 @@ fun applyRounding(value: Double, step: Double): Double {
 
 fun billableDurationMillis(elapsedMillis: Long, settings: AppSettings): Long {
     val minMillis = TimeUnit.MINUTES.toMillis(settings.minimumBillableMinutes.coerceAtLeast(0).toLong())
-    val stepMillis = TimeUnit.MINUTES.toMillis(settings.billingStepMinutes.coerceAtLeast(1).toLong())
-    val normalized = elapsedMillis.coerceAtLeast(minMillis)
-    return (ceil(normalized / stepMillis.toDouble()) * stepMillis).toLong()
+    return elapsedMillis.coerceAtLeast(minMillis)
 }
 
 fun priceFromPresets(durationMillis: Long, group: PriceGroup): Double {
@@ -407,7 +408,6 @@ fun saveAppSettings(context: Context, settings: AppSettings) {
         put("closingTime", settings.closingTime)
         put("salesRetentionDays", settings.salesRetentionDays)
         put("roundingStep", settings.roundingStep)
-        put("billingStepMinutes", settings.billingStepMinutes)
         put("minimumBillableMinutes", settings.minimumBillableMinutes)
         put("usePresetPriceInterpolation", settings.usePresetPriceInterpolation)
         put("priceGroups", JSONArray().apply {
@@ -473,7 +473,6 @@ fun loadAppSettings(context: Context): AppSettings {
             closingTime = json.optString("closingTime", "22:00"),
             salesRetentionDays = json.optInt("salesRetentionDays", 30),
             roundingStep = json.optDouble("roundingStep", 0.10),
-            billingStepMinutes = json.optInt("billingStepMinutes", 10),
             minimumBillableMinutes = json.optInt("minimumBillableMinutes", 0),
             usePresetPriceInterpolation = json.optBoolean("usePresetPriceInterpolation", false),
             priceGroups = if (groups.isEmpty()) AppSettings().priceGroups else groups,
@@ -655,6 +654,25 @@ fun CircularWavyProgressIndicator(
 // --- ACTIVIDAD PRINCIPAL ---
 
 class CheckoutActivity : ComponentActivity() {
+    private fun shareCheckoutSnapshot() {
+        val view = window.decorView.rootView
+        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        view.draw(canvas)
+
+        val dir = File(cacheDir, "shared-tickets")
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, "boleta_${System.currentTimeMillis()}.png")
+        file.outputStream().use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }, "Compartir boleta"))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -689,7 +707,8 @@ class CheckoutActivity : ComponentActivity() {
                             putExtra("yapeProofUri", proofUri)
                         })
                         finish()
-                    }
+                    },
+                    onShare = { shareCheckoutSnapshot() }
                 )
             }
         }
@@ -707,7 +726,8 @@ fun CheckoutTicketScreen(
     priceGroupName: String,
     extras: List<ExtraItem>,
     onCancel: () -> Unit,
-    onPaid: (String, String?) -> Unit
+    onPaid: (String, String?) -> Unit,
+    onShare: () -> Unit
 ) {
     val context = LocalContext.current
     var paymentMethod by rememberSaveable { mutableStateOf(defaultPayment) }
@@ -722,18 +742,13 @@ fun CheckoutTicketScreen(
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         if (ok) proofUri = pendingPhotoUri?.toString()
     }
-
-    val ticket = ticketText(
-        cabinName = cabinName,
-        amount = amount,
-        paymentMethod = paymentMethod,
-        startTime = startTime,
-        endTime = endTime,
-        durationMillis = durationMillis,
-        priceGroupName = priceGroupName,
-        extras = extras,
-        yapeProofUri = proofUri
-    )
+    val proofBitmap = remember(proofUri) {
+        proofUri?.let { uri ->
+            runCatching {
+                context.contentResolver.openInputStream(Uri.parse(uri))?.use { BitmapFactory.decodeStream(it) }
+            }.getOrNull()
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         Canvas(Modifier.fillMaxSize()) {
@@ -759,7 +774,7 @@ fun CheckoutTicketScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onCancel) { Icon(Icons.Default.ArrowBack, null) }
                 Text("Boleta de cobro", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
-                IconButton(onClick = { shareTicket(context, ticket, proofUri) }) { Icon(Icons.Default.Share, null) }
+                IconButton(onClick = onShare) { Icon(Icons.Default.Share, null) }
             }
 
             ElevatedCard(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
@@ -798,6 +813,19 @@ fun CheckoutTicketScreen(
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Prueba de Yape", fontWeight = FontWeight.Bold)
                         Text(if (proofUri == null) "Opcional: toma una foto del pago ahora." else "Foto agregada como prueba local.", style = MaterialTheme.typography.bodySmall)
+                        proofBitmap?.let { bitmap ->
+                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "Prueba de Yape",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 160.dp, max = 260.dp)
+                                        .clip(RoundedCornerShape(14.dp)),
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                        }
                         Button(onClick = {
                             val uri = createYapeProofUri(context)
                             pendingPhotoUri = uri
@@ -1143,7 +1171,6 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
     var showStartDialog by remember { mutableStateOf(false) }
     var showAddTimeDialog by remember { mutableStateOf(false) }
     var showExtraDialog by remember { mutableStateOf(false) }
-    var showSummaryDialog by remember { mutableStateOf(false) }
     var showTransferDialog by remember { mutableStateOf(false) }
     var checkoutEndTime by remember { mutableLongStateOf(0L) }
     var checkoutDuration by remember { mutableLongStateOf(0L) }
@@ -1306,7 +1333,7 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
                                 onLog(ActivityLog(cabinName = cabin.name, message = "Pausó sesión"))
                             }
                         }) { Icon(if (cabin.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null) }
-                        IconButton(onClick = { showSummaryDialog = true }) { Icon(Icons.Default.Close, null, tint = Color.Red, modifier = Modifier.size(28.dp)) }
+                        IconButton(onClick = { openCheckout("Efectivo") }) { Icon(Icons.Default.Close, null, tint = Color.Red, modifier = Modifier.size(28.dp)) }
                     }
                 }
             }
@@ -1328,30 +1355,6 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
         onLog(ActivityLog(cabinName = cabin.name, message = "Añadió producto ${it.name} por S/ ${String.format(Locale.getDefault(), "%.2f", it.price)}"))
         showExtraDialog = false
     })
-    if (showSummaryDialog) SummaryDialog(
-        cabin = cabin,
-        cost = finalCost,
-        allCabins = allCabins,
-        onDismiss = { showSummaryDialog = false },
-        onConfirm = { method ->
-            openCheckout(method)
-            showSummaryDialog = false
-        },
-        onAddToOther = { targetId ->
-            val targetIdx = allCabins.indexOfFirst { it.id == targetId }
-            if (targetIdx != -1) {
-                val targetCabin = allCabins[targetIdx]
-                val updatedTarget = targetCabin.copy(transferBalance = targetCabin.transferBalance + finalCost)
-                (allCabins as? MutableList<Cabin>)?.let { list ->
-                    list[targetIdx] = updatedTarget
-                    saveCabins(context, list)
-                }
-                onUpdate(Cabin(id = cabin.id, name = cabin.name))
-            }
-            showSummaryDialog = false
-        }
-    )
-
     if (showTransferDialog) TransferDialog(
         currentCabin = cabin,
         currentCost = finalCost,
@@ -1768,15 +1771,9 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
             }
 
             SettingsTextField(
-                value = settings.billingStepMinutes.toString(),
-                onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(billingStepMinutes = n.coerceAtLeast(1))) } },
-                label = "Cobrar por partes cada X minutos",
-                keyboardType = KeyboardType.Number
-            )
-            SettingsTextField(
                 value = settings.minimumBillableMinutes.toString(),
                 onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(minimumBillableMinutes = n.coerceAtLeast(0))) } },
-                label = "Mínimo cobrable en minutos",
+                label = "Mínimo cobrable antes de cobrar normal",
                 keyboardType = KeyboardType.Number
             )
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
