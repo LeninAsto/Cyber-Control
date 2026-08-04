@@ -834,11 +834,42 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+class SettingsActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            CyberControlTheme {
+                val context = LocalContext.current
+                var settings by remember { mutableStateOf(loadAppSettings(context)) }
+                Scaffold(topBar = {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = {
+                            setResult(Activity.RESULT_OK)
+                            finish()
+                        }) { Icon(Icons.Default.ArrowBack, null) }
+                        Text("Ajustes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                    }
+                }) { innerPadding ->
+                    Box(Modifier.padding(innerPadding)) {
+                        SettingsScreen(settings, onSettingsChange = {
+                            settings = it
+                            saveAppSettings(context, it)
+                        })
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun CyberControlApp() {
     val context = LocalContext.current
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.CABINS) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(loadAppSettings(context)) }
     val cabins = remember { mutableStateListOf<Cabin>() }
@@ -847,6 +878,9 @@ fun CyberControlApp() {
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {}
+    val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        settings = loadAppSettings(context)
+    }
 
     // CARGA INICIAL
     LaunchedEffect(Unit) {
@@ -905,9 +939,8 @@ fun CyberControlApp() {
                 item(
                     icon = { Icon(dest.icon, contentDescription = dest.label) },
                     label = { Text(dest.label) },
-                    selected = dest == currentDestination && !showSettings,
+                    selected = dest == currentDestination,
                     onClick = {
-                        showSettings = false
                         currentDestination = dest
                     }
                 )
@@ -920,7 +953,7 @@ fun CyberControlApp() {
                     modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(if (showSettings) "Ajustes" else currentDestination.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
+                    Text(currentDestination.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
                     Box {
                         IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Default.MoreVert, null) }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
@@ -928,7 +961,7 @@ fun CyberControlApp() {
                                 text = { Text("Ajustes") },
                                 leadingIcon = { Icon(Icons.Default.Settings, null) },
                                 onClick = {
-                                    showSettings = true
+                                    settingsLauncher.launch(Intent(context, SettingsActivity::class.java))
                                     menuExpanded = false
                                 }
                             )
@@ -939,12 +972,7 @@ fun CyberControlApp() {
             }
         }) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
-                if (showSettings) {
-                    SettingsScreen(settings, onSettingsChange = {
-                        settings = it
-                        saveAppSettings(context, it)
-                    })
-                } else when (currentDestination) {
+                when (currentDestination) {
                     AppDestinations.CABINS -> CabinsScreen(cabins, settings, onSaleRecorded = { sale ->
                         sales.add(sale)
                         saveSales(context, sales)
@@ -979,6 +1007,7 @@ fun ClosingTimeBar(closingTimeStr: String) {
 fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecorded: (Sale) -> Unit, onLog: (ActivityLog) -> Unit) {
     val context = LocalContext.current
     var gridView by rememberSaveable { mutableStateOf(false) }
+    var selectedCabinId by rememberSaveable { mutableStateOf<Int?>(null) }
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Panel de Cabinas", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -1010,10 +1039,15 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
         }
 
         if (gridView) {
-            LazyVerticalGrid(columns = GridCells.Adaptive(320.dp), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
+            LazyVerticalGrid(columns = GridCells.Fixed(2), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
                 items(cabins, key = { it.id }) { cabin ->
                     val group = remember(cabin.id, settings) { getPriceGroupForCabin(cabin.id, settings) }
-                    CabinCard(cabin, group, settings, cabins, onUpdate = { updateCabin(cabin, it) }, onStop = { stopCabin(cabin, it) }, onLog = onLog)
+                    CabinCompactTile(
+                        cabin = cabin,
+                        group = group,
+                        settings = settings,
+                        onClick = { selectedCabinId = cabin.id }
+                    )
                 }
             }
         } else {
@@ -1023,6 +1057,81 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
                     CabinCard(cabin, group, settings, cabins, onUpdate = { updateCabin(cabin, it) }, onStop = { stopCabin(cabin, it) }, onLog = onLog)
                 }
             }
+        }
+
+        selectedCabinId?.let { id ->
+            val cabin = cabins.firstOrNull { it.id == id }
+            if (cabin != null) {
+                val group = getPriceGroupForCabin(cabin.id, settings)
+                AlertDialog(
+                    onDismissRequest = { selectedCabinId = null },
+                    confirmButton = {},
+                    text = {
+                        CabinCard(
+                            cabin = cabin,
+                            group = group,
+                            settings = settings,
+                            allCabins = cabins,
+                            onUpdate = { updateCabin(cabin, it) },
+                            onStop = {
+                                stopCabin(cabin, it)
+                                selectedCabinId = null
+                            },
+                            onLog = onLog
+                        )
+                    }
+                )
+            } else {
+                selectedCabinId = null
+            }
+        }
+    }
+}
+
+@Composable
+fun CabinCompactTile(cabin: Cabin, group: PriceGroup, settings: AppSettings, onClick: () -> Unit) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(cabin.isOccupied, cabin.isPaused) {
+        while (cabin.isOccupied && !cabin.isPaused) {
+            delay(1000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val elapsed = sessionElapsed(cabin, now)
+    val baseCost = if (cabin.mode == SessionMode.PREPAID) cabin.prepaidPrice else calculateFreeSessionCost(elapsed, group, settings)
+    val total = applyRounding(baseCost + cabin.extras.sumOf { it.price } + cabin.transferBalance, settings.roundingStep)
+    val isTimeUp = isCabinTimeUp(cabin, settings, now)
+    val statusColor = when {
+        isTimeUp -> MaterialTheme.colorScheme.errorContainer
+        cabin.isPaused -> MaterialTheme.colorScheme.secondaryContainer
+        cabin.isOccupied -> MaterialTheme.colorScheme.primaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 132.dp).clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = statusColor)
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Computer, null, modifier = Modifier.size(22.dp), tint = if (cabin.isOccupied) MaterialTheme.colorScheme.primary else Color.Gray)
+                Spacer(Modifier.width(6.dp))
+                Text(cabin.name, fontWeight = FontWeight.Black, maxLines = 1)
+            }
+            Text(
+                when {
+                    !cabin.isOccupied -> "Disponible"
+                    isTimeUp -> "Tiempo agotado"
+                    cabin.isPaused -> "Pausado"
+                    cabin.mode == SessionMode.PREPAID -> "Restan ${formatTime((cabin.prepaidDurationMillis - elapsed).coerceAtLeast(0L))}"
+                    else -> formatTime(elapsed)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(group.name, style = MaterialTheme.typography.labelSmall, color = Color.Gray, maxLines = 1)
+            if (cabin.isOccupied) Text("S/ ${String.format(Locale.getDefault(), "%.2f", total)}", fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
