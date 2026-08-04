@@ -104,14 +104,14 @@ Permite controlar en tiempo real el estado de cada PC, manejar distintos modos d
 
 ### Compilar con GitHub Actions
 
-El workflow `Build Android APKs` compila la app en GitHub Actions con JDK 17 y Android SDK API 36. En cada `push` o `pull_request` ejecuta pruebas unitarias, genera APKs debug por ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`) y también un APK universal.
+El workflow `Build Android APKs` compila la app en GitHub Actions con JDK 17 y Android SDK API 36. En cada `push` o `pull_request` ejecuta pruebas unitarias release, genera APKs release por ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`) y también un APK universal.
 
 Para descargar el APK:
 
 1. Entra al repositorio en GitHub.
 2. Abre la pestaña **Actions**.
 3. Selecciona la ejecución más reciente de **Build Android APKs**.
-4. Baja el artifact `app-universal-debug` para instalarlo sin elegir ABI manualmente.
+4. Baja el artifact `app-universal-release` para instalarlo sin elegir ABI manualmente.
 
 ---
 

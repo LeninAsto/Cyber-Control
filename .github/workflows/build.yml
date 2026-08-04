@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build debug APKs
+    name: Build release APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -31,36 +31,36 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Run unit tests
-        run: ./gradlew --no-daemon :app:testDebugUnitTest
+      - name: Run release unit tests
+        run: ./gradlew --no-daemon :app:testReleaseUnitTest
 
-      - name: Build debug APKs
-        run: ./gradlew --no-daemon :app:assembleDebug
+      - name: Build release APKs
+        run: ./gradlew --no-daemon :app:assembleRelease
 
       - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-universal-debug
-          path: app/build/outputs/apk/debug/*universal*.apk
+          name: app-universal-release
+          path: app/build/outputs/apk/release/*universal*.apk
           if-no-files-found: error
 
       - name: Upload arm64-v8a APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-arm64-v8a-debug
-          path: app/build/outputs/apk/debug/*arm64-v8a*.apk
+          name: app-arm64-v8a-release
+          path: app/build/outputs/apk/release/*arm64-v8a*.apk
           if-no-files-found: error
 
       - name: Upload x86_64 APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-x86_64-debug
-          path: app/build/outputs/apk/debug/*x86_64*.apk
+          name: app-x86_64-release
+          path: app/build/outputs/apk/release/*x86_64*.apk
           if-no-files-found: error
 
       - name: Upload armeabi-v7a APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-armeabi-v7a-debug
-          path: app/build/outputs/apk/debug/*armeabi-v7a*.apk
+          name: app-armeabi-v7a-release
+          path: app/build/outputs/apk/release/*armeabi-v7a*.apk
           if-no-files-found: error
