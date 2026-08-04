@@ -76,15 +76,15 @@ Permite controlar en tiempo real el estado de cada PC, manejar distintos modos d
 | Almacenamiento | SharedPreferences + JSON | — |
 | Notificaciones | AndroidX NotificationCompat | — |
 | Build | Gradle | 8.13 |
-| SDK mínimo | Android 12 (API 32) | — |
-| SDK objetivo | Android 15 (API 36) | — |
+| SDK mínimo | Android 11 (API 30) | — |
+| SDK objetivo | API 36 | — |
 | Java bytecode | Java 11 | — |
 
 ---
 
 ## 📦 Requisitos
 
-- **Android 12 o superior** (API nivel 32+).
+- **Android 11 o superior** (API nivel 30+).
 - Permiso `POST_NOTIFICATIONS` para recibir alertas de tiempo agotado.
 
 ---
@@ -101,6 +101,17 @@ Permite controlar en tiempo real el estado de cada PC, manejar distintos modos d
 5. Pulsa **Run ▶** para instalar y ejecutar la aplicación.
 
 > **Nota:** el archivo `local.properties` con la ruta del SDK se genera automáticamente por Android Studio y no está incluido en el repositorio.
+
+### Compilar con GitHub Actions
+
+El workflow `Build Android APKs` compila la app en GitHub Actions con JDK 17 y Android SDK API 36. En cada `push` o `pull_request` ejecuta pruebas unitarias, genera APKs debug por ABI (`arm64-v8a`, `armeabi-v7a`, `x86_64`) y también un APK universal.
+
+Para descargar el APK:
+
+1. Entra al repositorio en GitHub.
+2. Abre la pestaña **Actions**.
+3. Selecciona la ejecución más reciente de **Build Android APKs**.
+4. Baja el artifact `app-universal-debug` para instalarlo sin elegir ABI manualmente.
 
 ---
 
