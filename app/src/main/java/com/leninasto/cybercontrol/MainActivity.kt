@@ -1,15 +1,19 @@
 package com.leninasto.cybercontrol
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -57,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.leninasto.cybercontrol.ui.theme.CyberControlTheme
 import kotlinx.coroutines.delay
 import org.json.JSONArray
@@ -176,6 +181,20 @@ fun isToday(timestamp: Long): Boolean {
     return fmt.format(Date(timestamp)) == fmt.format(Date())
 }
 
+fun parseClosingTime(closingTimeStr: String): LocalTime {
+    return try {
+        LocalTime.parse(closingTimeStr, DateTimeFormatter.ofPattern("HH:mm"))
+    } catch (e: Exception) {
+        LocalTime.of(22, 0)
+    }
+}
+
+fun millisUntilNextClosing(closingTimeStr: String, now: LocalTime = LocalTime.now()): Long {
+    val closing = parseClosingTime(closingTimeStr)
+    val diff = ChronoUnit.MILLIS.between(now, closing)
+    return if (diff < 0) diff + TimeUnit.DAYS.toMillis(1) else diff
+}
+
 fun getPriceGroupForCabin(cabinId: Int, settings: AppSettings): PriceGroup {
     val specific = settings.priceGroups.filter { it.cabinRange != "all" }.find { group ->
         val parts = group.cabinRange.split(",")
@@ -188,10 +207,18 @@ fun getPriceGroupForCabin(cabinId: Int, settings: AppSettings): PriceGroup {
             } else p.trim().toIntOrNull() == cabinId
         }
     }
-    return specific ?: settings.priceGroups.first { it.cabinRange == "all" }
+    return specific
+        ?: settings.priceGroups.firstOrNull { it.cabinRange == "all" }
+        ?: AppSettings().priceGroups.first()
 }
 
 fun sendNotification(context: Context, title: String, message: String) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+        return
+    }
+
     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     val cid = "cyber_alerts"
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -426,9 +453,18 @@ fun CyberControlApp() {
     var settings by remember { mutableStateOf(loadAppSettings(context)) }
     val cabins = remember { mutableStateListOf<Cabin>() }
     val sales = remember { mutableStateListOf<Sale>() }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
 
     // CARGA INICIAL
     LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
         val loadedSales = loadSales(context)
         sales.clear()
         sales.addAll(loadedSales)
@@ -488,8 +524,7 @@ fun CyberControlApp() {
 fun ClosingTimeBar(closingTimeStr: String) {
     val currentTime = remember { mutableStateOf(LocalTime.now()) }
     LaunchedEffect(Unit) { while (true) { currentTime.value = LocalTime.now(); delay(1000) } }
-    val closingTime = try { LocalTime.parse(closingTimeStr, DateTimeFormatter.ofPattern("HH:mm")) } catch (e: Exception) { LocalTime.of(22, 0) }
-    val minutesToClose = ChronoUnit.MINUTES.between(currentTime.value, closingTime)
+    val minutesToClose = TimeUnit.MILLISECONDS.toMinutes(millisUntilNextClosing(closingTimeStr, currentTime.value))
     if (minutesToClose in 1..60) {
         Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
             Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
@@ -557,10 +592,7 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
     } else 0L
 
     val millisUntilClosing = remember(settings.closingTime, currentTimeMillis) {
-        val now = LocalTime.now()
-        val closing = try { LocalTime.parse(settings.closingTime, DateTimeFormatter.ofPattern("HH:mm")) } catch (e: Exception) { LocalTime.of(22, 0) }
-        val diff = ChronoUnit.MILLIS.between(now, closing)
-        if (diff > 0) diff else if (diff < 0) -1L else 0L
+        millisUntilNextClosing(settings.closingTime)
     }
     val isClosingSoon = millisUntilClosing in 1..3600000 
     val isAutoCountdown = cabin.isOccupied && cabin.mode == SessionMode.FREE && isClosingSoon
@@ -856,6 +888,7 @@ fun SummaryDialog(cabin: Cabin, cost: Double, allCabins: List<Cabin>, onDismiss:
 
 @Composable
 fun StatsScreen(sales: MutableList<Sale>) {
+    val context = LocalContext.current
     val groupedSales = sales.groupBy { formatDate(it.timestamp) }.toList().sortedByDescending { it.first }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Historial de Ventas", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -889,7 +922,10 @@ fun StatsScreen(sales: MutableList<Sale>) {
                                     Text("${formatClockTime(sale.startTime)} - ${formatClockTime(sale.endTime)}", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                                 }
                             }
-                            Button(onClick = { sales.removeAll(dailySales) }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), modifier = Modifier.padding(top = 8.dp).fillMaxWidth()) { Text("Borrar registros") }
+                            Button(onClick = {
+                                sales.removeAll(dailySales)
+                                saveSales(context, sales)
+                            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error), modifier = Modifier.padding(top = 8.dp).fillMaxWidth()) { Text("Borrar registros") }
                         }
                     }
                 }
@@ -933,9 +969,11 @@ fun StartSessionDialog(group: PriceGroup, onDismiss: () -> Unit, onStart: (Sessi
                         TextButton(onClick = { showCustomDuration = false }) { Text("Volver") }
                         Button(onClick = {
                             val mins = customMinutes.toLongOrNull() ?: 0L
-                            val price = (mins / 60.0) * group.pricePerHour
-                            onStart(mode, mins * 60000L, price)
-                        }) { Text("Confirmar") }
+                            if (mins > 0L) {
+                                val price = (mins / 60.0) * group.pricePerHour
+                                onStart(mode, mins * 60000L, price)
+                            }
+                        }, enabled = (customMinutes.toLongOrNull() ?: 0L) > 0L) { Text("Confirmar") }
                     }
                 }
             }
