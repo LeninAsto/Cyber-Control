@@ -3,6 +3,9 @@
     <cache-path
         name="shared_tickets"
         path="shared-tickets/" />
+    <cache-path
+        name="exports"
+        path="exports/" />
     <external-files-path
         name="yape_proofs"
         path="yape-proofs/" />

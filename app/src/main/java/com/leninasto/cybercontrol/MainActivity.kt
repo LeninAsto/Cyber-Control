@@ -132,14 +132,20 @@ data class Cabin(
     val prepaidPrice: Double = 0.0,
     val extras: List<ExtraItem> = emptyList(),
     val notificationSent: Boolean = false,
-    val transferBalance: Double = 0.0
+    val transferBalance: Double = 0.0,
+    val alertStage: Int = 0,
+    val lastAlertMillis: Long = 0L
 )
 
 data class AppSettings(
+    val businessName: String = "Cyber Control",
     val cabinCount: Int = 10,
     val includeCabinZero: Boolean = false,
     val closingTime: String = "22:00",
     val salesRetentionDays: Int = 30,
+    val alertFiveMinutes: Boolean = true,
+    val alertOneMinute: Boolean = true,
+    val repeatOverdueAlertMinutes: Int = 5,
     val priceGroups: List<PriceGroup> = listOf(
         PriceGroup(
             name = "Básico",
@@ -262,12 +268,38 @@ fun isCabinTimeUp(cabin: Cabin, settings: AppSettings, nowMillis: Long = System.
         (isAutoCountdown && millisToClose <= 0)
 }
 
+fun remainingPrepaidMillis(cabin: Cabin, nowMillis: Long = System.currentTimeMillis()): Long {
+    return if (cabin.mode == SessionMode.PREPAID) {
+        (cabin.prepaidDurationMillis - sessionElapsed(cabin, nowMillis)).coerceAtLeast(0L)
+    } else 0L
+}
+
+fun nextCabinToFinish(cabins: List<Cabin>, nowMillis: Long = System.currentTimeMillis()): Cabin? {
+    return cabins
+        .filter { it.isOccupied && it.mode == SessionMode.PREPAID }
+        .minByOrNull { remainingPrepaidMillis(it, nowMillis) }
+}
+
+fun notificationPlanForCabin(cabin: Cabin, settings: AppSettings, nowMillis: Long = System.currentTimeMillis()): Pair<Int, String>? {
+    if (!cabin.isOccupied || cabin.mode != SessionMode.PREPAID) return null
+    val remaining = remainingPrepaidMillis(cabin, nowMillis)
+    val repeatMillis = TimeUnit.MINUTES.toMillis(settings.repeatOverdueAlertMinutes.coerceAtLeast(1).toLong())
+    return when {
+        remaining <= 0L && cabin.alertStage < 3 -> 3 to "La ${cabin.name} ha terminado."
+        remaining <= 0L && nowMillis - cabin.lastAlertMillis >= repeatMillis -> 4 to "La ${cabin.name} sigue con tiempo agotado."
+        settings.alertOneMinute && remaining <= TimeUnit.MINUTES.toMillis(1) && cabin.alertStage < 2 -> 2 to "A ${cabin.name} le queda 1 minuto."
+        settings.alertFiveMinutes && remaining <= TimeUnit.MINUTES.toMillis(5) && cabin.alertStage < 1 -> 1 to "A ${cabin.name} le quedan 5 minutos."
+        else -> null
+    }
+}
+
 fun extrasText(extras: List<ExtraItem>): String {
     return if (extras.isEmpty()) "Sin extras"
     else extras.joinToString("\n") { "- ${it.name}: S/ ${String.format(Locale.getDefault(), "%.2f", it.price)}" }
 }
 
 fun ticketText(
+    businessName: String = "Cyber Control",
     cabinName: String,
     amount: Double,
     paymentMethod: String,
@@ -279,7 +311,7 @@ fun ticketText(
     yapeProofUri: String? = null
 ): String {
     return """
-Cyber Control
+$businessName
 Cabina: $cabinName
 Tarifa: ${if (priceGroupName.isBlank()) "Sin grupo" else priceGroupName}
 Inicio: ${formatExactDateTime(startTime)}
@@ -310,12 +342,48 @@ fun exportSalesText(sales: List<Sale>): String {
     return "$header\n$body"
 }
 
+fun todaySales(sales: List<Sale>): List<Sale> = sales.filter { isToday(it.timestamp) }
+
+fun salesTotal(sales: List<Sale>, method: String? = null): Double {
+    return sales.filter { method == null || it.paymentMethod == method }.sumOf { it.amount }
+}
+
+fun exportSalesCsv(context: Context, sales: List<Sale>): Uri {
+    val dir = File(context.cacheDir, "exports")
+    if (!dir.exists()) dir.mkdirs()
+    val file = File(dir, "ventas_${System.currentTimeMillis()}.csv")
+    val rows = mutableListOf("Cabina,Inicio,Cierre,Duracion,Extras,Metodo,Total")
+    sales.sortedByDescending { it.timestamp }.forEach { sale ->
+        val extras = if (sale.extras.isEmpty()) "Sin extras" else sale.extras.joinToString("; ") { "${it.name} S/ ${String.format(Locale.US, "%.2f", it.price)}" }
+        rows.add(listOf(
+            sale.cabinName,
+            formatExactDateTime(sale.startTime),
+            formatExactDateTime(sale.endTime),
+            formatTime(sale.durationMillis),
+            extras,
+            sale.paymentMethod,
+            String.format(Locale.US, "%.2f", sale.amount)
+        ).joinToString(",") { "\"${it.replace("\"", "\"\"")}\"" })
+    }
+    file.writeText(rows.joinToString("\n"), Charsets.UTF_8)
+    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
 fun shareText(context: Context, title: String, text: String) {
     context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
         putExtra(Intent.EXTRA_SUBJECT, title)
         putExtra(Intent.EXTRA_TEXT, text)
     }, title))
+}
+
+fun shareCsv(context: Context, sales: List<Sale>) {
+    val uri = exportSalesCsv(context, sales)
+    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+        type = "text/csv"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }, "Compartir CSV"))
 }
 
 fun shareTicket(context: Context, text: String, proofUri: String? = null) {
@@ -403,10 +471,14 @@ fun extrasFromJsonArray(array: JSONArray?): List<ExtraItem> {
 fun saveAppSettings(context: Context, settings: AppSettings) {
     val prefs = context.getSharedPreferences("cyber_prefs", Context.MODE_PRIVATE)
     val json = JSONObject().apply {
+        put("businessName", settings.businessName)
         put("cabinCount", settings.cabinCount)
         put("includeCabinZero", settings.includeCabinZero)
         put("closingTime", settings.closingTime)
         put("salesRetentionDays", settings.salesRetentionDays)
+        put("alertFiveMinutes", settings.alertFiveMinutes)
+        put("alertOneMinute", settings.alertOneMinute)
+        put("repeatOverdueAlertMinutes", settings.repeatOverdueAlertMinutes)
         put("roundingStep", settings.roundingStep)
         put("minimumBillableMinutes", settings.minimumBillableMinutes)
         put("usePresetPriceInterpolation", settings.usePresetPriceInterpolation)
@@ -468,10 +540,14 @@ fun loadAppSettings(context: Context): AppSettings {
             }
         }
         AppSettings(
+            businessName = json.optString("businessName", "Cyber Control"),
             cabinCount = json.optInt("cabinCount", 10),
             includeCabinZero = json.optBoolean("includeCabinZero", false),
             closingTime = json.optString("closingTime", "22:00"),
             salesRetentionDays = json.optInt("salesRetentionDays", 30),
+            alertFiveMinutes = json.optBoolean("alertFiveMinutes", true),
+            alertOneMinute = json.optBoolean("alertOneMinute", true),
+            repeatOverdueAlertMinutes = json.optInt("repeatOverdueAlertMinutes", 5),
             roundingStep = json.optDouble("roundingStep", 0.10),
             minimumBillableMinutes = json.optInt("minimumBillableMinutes", 0),
             usePresetPriceInterpolation = json.optBoolean("usePresetPriceInterpolation", false),
@@ -569,6 +645,8 @@ fun saveCabins(context: Context, cabins: List<Cabin>) {
             put("prepaidDurationMillis", c.prepaidDurationMillis)
             put("prepaidPrice", c.prepaidPrice); put("notificationSent", c.notificationSent)
             put("transferBalance", c.transferBalance)
+            put("alertStage", c.alertStage)
+            put("lastAlertMillis", c.lastAlertMillis)
             put("extras", extrasToJsonArray(c.extras))
         })
     }
@@ -592,7 +670,9 @@ fun loadCabins(context: Context): List<Cabin> {
                 totalPausedDuration = obj.getLong("totalPausedDuration"),
                 prepaidDurationMillis = obj.getLong("prepaidDurationMillis"), prepaidPrice = obj.getDouble("prepaidPrice"),
                 extras = extras, notificationSent = obj.optBoolean("notificationSent", false),
-                transferBalance = obj.optDouble("transferBalance", 0.0)
+                transferBalance = obj.optDouble("transferBalance", 0.0),
+                alertStage = obj.optInt("alertStage", if (obj.optBoolean("notificationSent", false)) 3 else 0),
+                lastAlertMillis = obj.optLong("lastAlertMillis", 0L)
             ))
         }
         list
@@ -656,6 +736,7 @@ fun CircularWavyProgressIndicator(
 class CheckoutActivity : ComponentActivity() {
     private fun shareCheckoutSnapshot() {
         val view = window.decorView.rootView
+        if (view.width <= 0 || view.height <= 0) return
         val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bitmap)
         view.draw(canvas)
@@ -678,6 +759,7 @@ class CheckoutActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val cabinName = intent.getStringExtra("cabinName").orEmpty()
+        val businessName = intent.getStringExtra("businessName") ?: "Cyber Control"
         val amount = intent.getDoubleExtra("amount", 0.0)
         val defaultPayment = intent.getStringExtra("paymentMethod") ?: "Efectivo"
         val startTime = intent.getLongExtra("startTime", 0L)
@@ -689,6 +771,7 @@ class CheckoutActivity : ComponentActivity() {
         setContent {
             CyberControlTheme {
                 CheckoutTicketScreen(
+                    businessName = businessName,
                     cabinName = cabinName,
                     amount = amount,
                     defaultPayment = defaultPayment,
@@ -717,6 +800,7 @@ class CheckoutActivity : ComponentActivity() {
 
 @Composable
 fun CheckoutTicketScreen(
+    businessName: String,
     cabinName: String,
     amount: Double,
     defaultPayment: String,
@@ -773,7 +857,10 @@ fun CheckoutTicketScreen(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onCancel) { Icon(Icons.Default.ArrowBack, null) }
-                Text("Boleta de cobro", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f)) {
+                    Text(businessName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black, maxLines = 1)
+                    Text("Boleta de cobro", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                }
                 IconButton(onClick = onShare) { Icon(Icons.Default.Share, null) }
             }
 
@@ -945,19 +1032,29 @@ fun CyberControlApp() {
         saveCabins(context, cabins)
     }
 
-    LaunchedEffect(settings.closingTime) {
+    LaunchedEffect(
+        settings.closingTime,
+        settings.alertFiveMinutes,
+        settings.alertOneMinute,
+        settings.repeatOverdueAlertMinutes
+    ) {
         while (true) {
             delay(1000)
-            val finishedCabins = cabins.mapIndexedNotNull { index, cabin ->
-                if (cabin.isOccupied && !cabin.notificationSent && isCabinTimeUp(cabin, settings)) {
-                    index to cabin
-                } else null
+            val now = System.currentTimeMillis()
+            val alertCabins = cabins.mapIndexedNotNull { index, cabin ->
+                val plan = notificationPlanForCabin(cabin, settings, now)
+                if (plan != null) Triple(index, cabin, plan) else null
             }
-            finishedCabins.forEach { (index, cabin) ->
-                sendNotification(context, "Tiempo agotado", "La ${cabin.name} ha terminado.")
-                cabins[index] = cabin.copy(notificationSent = true)
+            alertCabins.forEach { (index, cabin, plan) ->
+                val (stage, message) = plan
+                sendNotification(context, if (stage >= 3) "Tiempo agotado" else "Tiempo por terminar", message)
+                cabins[index] = cabin.copy(
+                    notificationSent = stage >= 3,
+                    alertStage = stage.coerceAtMost(3),
+                    lastAlertMillis = now
+                )
             }
-            if (finishedCabins.isNotEmpty()) saveCabins(context, cabins)
+            if (alertCabins.isNotEmpty()) saveCabins(context, cabins)
         }
     }
 
@@ -1001,7 +1098,7 @@ fun CyberControlApp() {
         }) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
                 when (currentDestination) {
-                    AppDestinations.CABINS -> CabinsScreen(cabins, settings, onSaleRecorded = { sale ->
+                    AppDestinations.CABINS -> CabinsScreen(cabins, settings, sales, onSaleRecorded = { sale ->
                         sales.add(sale)
                         saveSales(context, sales)
                     }, onLog = { log ->
@@ -1032,7 +1129,7 @@ fun ClosingTimeBar(closingTimeStr: String) {
 }
 
 @Composable
-fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecorded: (Sale) -> Unit, onLog: (ActivityLog) -> Unit) {
+fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, sales: List<Sale>, onSaleRecorded: (Sale) -> Unit, onLog: (ActivityLog) -> Unit) {
     val context = LocalContext.current
     var gridView by rememberSaveable { mutableStateOf(false) }
     var selectedCabinId by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -1048,6 +1145,8 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
                 Icon(if (gridView) Icons.AutoMirrored.Filled.List else Icons.Default.GridView, null)
             }
         }
+        Spacer(modifier = Modifier.height(16.dp))
+        OperationalDashboard(cabins = cabins, sales = sales, settings = settings)
         Spacer(modifier = Modifier.height(16.dp))
         val updateCabin: (Cabin, Cabin) -> Unit = { original, updated ->
             val idx = cabins.indexOfFirst { it.id == original.id }
@@ -1067,7 +1166,13 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
         }
 
         if (gridView) {
-            LazyVerticalGrid(columns = GridCells.Fixed(2), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
                 items(cabins, key = { it.id }) { cabin ->
                     val group = remember(cabin.id, settings) { getPriceGroupForCabin(cabin.id, settings) }
                     CabinCompactTile(
@@ -1079,7 +1184,11 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
                 }
             }
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 80.dp)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
                 items(cabins, key = { it.id }) { cabin ->
                     val group = remember(cabin.id, settings) { getPriceGroupForCabin(cabin.id, settings) }
                     CabinCard(cabin, group, settings, cabins, onUpdate = { updateCabin(cabin, it) }, onStop = { stopCabin(cabin, it) }, onLog = onLog)
@@ -1111,6 +1220,95 @@ fun CabinsScreen(cabins: MutableList<Cabin>, settings: AppSettings, onSaleRecord
                 )
             } else {
                 selectedCabinId = null
+            }
+        }
+    }
+}
+
+@Composable
+fun OperationalDashboard(cabins: List<Cabin>, sales: List<Sale>, settings: AppSettings) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(cabins) {
+        while (true) {
+            delay(1000)
+            now = System.currentTimeMillis()
+        }
+    }
+
+    val occupied = cabins.count { it.isOccupied }
+    val overdue = cabins.count { isCabinTimeUp(it, settings, now) }
+    val today = todaySales(sales)
+    val next = nextCabinToFinish(cabins, now)
+    val nextRemaining = next?.let { remainingPrepaidMillis(it, now) }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp))
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(settings.businessName.ifBlank { "Cyber Control" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, maxLines = 1)
+                    Text("Resumen de turno", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+                }
+                val statusColor = if (overdue > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                Surface(shape = CircleShape, color = statusColor.copy(alpha = 0.14f)) {
+                    Row(Modifier.padding(horizontal = 10.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.NotificationsActive, null, tint = statusColor, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (overdue > 0) "$overdue vencida(s)" else "OK", color = statusColor, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                DashboardMetric("Hoy", "S/ ${String.format(Locale.getDefault(), "%.2f", salesTotal(today))}", Icons.Default.AttachMoney, Modifier.weight(1f))
+                DashboardMetric("Ocupadas", "$occupied/${cabins.size}", Icons.Default.Computer, Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                DashboardMetric("Efectivo", "S/ ${String.format(Locale.getDefault(), "%.2f", salesTotal(today, "Efectivo"))}", Icons.Default.Payments, Modifier.weight(1f))
+                DashboardMetric("Yape", "S/ ${String.format(Locale.getDefault(), "%.2f", salesTotal(today, "Yape"))}", Icons.Default.QrCode2, Modifier.weight(1f))
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+            ) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Schedule, null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = if (next != null && nextRemaining != null) {
+                            "Proxima: ${next.name} en ${formatTime(nextRemaining)}"
+                        } else {
+                            "Sin tiempos controlados pendientes"
+                        },
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DashboardMetric(label: String, value: String, icon: ImageVector, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.height(72.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+    ) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)) {
+                Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(8.dp).size(18.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.labelSmall, color = Color.Gray, maxLines = 1)
+                Text(value, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleMedium, maxLines = 1)
             }
         }
     }
@@ -1228,6 +1426,7 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
         checkoutEndTime = System.currentTimeMillis()
         checkoutDuration = elapsed
         checkoutLauncher.launch(Intent(context, CheckoutActivity::class.java).apply {
+            putExtra("businessName", settings.businessName.ifBlank { "Cyber Control" })
             putExtra("cabinName", cabin.name)
             putExtra("amount", finalCost)
             putExtra("paymentMethod", defaultPayment)
@@ -1341,12 +1540,12 @@ fun CabinCard(cabin: Cabin, group: PriceGroup, settings: AppSettings, allCabins:
     }
 
     if (showStartDialog) StartSessionDialog(group, { showStartDialog = false }, { m, d, p ->
-        onUpdate(cabin.copy(isOccupied = true, mode = m, prepaidDurationMillis = d, prepaidPrice = p, startTimeMillis = System.currentTimeMillis()))
+        onUpdate(cabin.copy(isOccupied = true, mode = m, prepaidDurationMillis = d, prepaidPrice = p, startTimeMillis = System.currentTimeMillis(), notificationSent = false, alertStage = 0, lastAlertMillis = 0L))
         onLog(ActivityLog(cabinName = cabin.name, message = "Comenzó sesión ${if (m == SessionMode.FREE) "libre" else "controlada por ${formatTime(d)}"}"))
         showStartDialog = false
     })
     if (showAddTimeDialog) StartSessionDialog(group, { showAddTimeDialog = false }, { _, d, p ->
-        onUpdate(cabin.copy(prepaidDurationMillis = cabin.prepaidDurationMillis + d, prepaidPrice = cabin.prepaidPrice + p, notificationSent = false))
+        onUpdate(cabin.copy(prepaidDurationMillis = cabin.prepaidDurationMillis + d, prepaidPrice = cabin.prepaidPrice + p, notificationSent = false, alertStage = 0, lastAlertMillis = 0L))
         onLog(ActivityLog(cabinName = cabin.name, message = "Añadió tiempo: ${formatTime(d)} por S/ ${String.format(Locale.getDefault(), "%.2f", p)}"))
         showAddTimeDialog = false
     }, isAdding = true)
@@ -1529,6 +1728,7 @@ fun StatsScreen(sales: MutableList<Sale>, logs: List<ActivityLog>) {
     var tab by rememberSaveable { mutableStateOf(0) }
     var selectedSale by remember { mutableStateOf<Sale?>(null) }
     val groupedSales = sales.groupBy { formatDate(it.timestamp) }.toList().sortedByDescending { it.first }
+    val today = todaySales(sales)
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1536,7 +1736,11 @@ fun StatsScreen(sales: MutableList<Sale>, logs: List<ActivityLog>) {
             IconButton(onClick = { shareText(context, "Exportar ventas", exportSalesText(sales)) }, enabled = sales.isNotEmpty()) {
                 Icon(Icons.Default.Share, null)
             }
+            IconButton(onClick = { shareCsv(context, sales) }, enabled = sales.isNotEmpty()) {
+                Icon(Icons.Default.TableChart, null)
+            }
         }
+        DailyCloseCard(todaySales = today)
         TabRow(selectedTabIndex = tab) {
             Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Ventas") }, icon = { Icon(Icons.AutoMirrored.Filled.List, null) })
             Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Registros") }, icon = { Icon(Icons.Default.History, null) })
@@ -1601,9 +1805,32 @@ fun StatsScreen(sales: MutableList<Sale>, logs: List<ActivityLog>) {
 }
 
 @Composable
+fun DailyCloseCard(todaySales: List<Sale>) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f))
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.PointOfSale, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Cierre rapido de caja", fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
+                Text("${todaySales.size} venta(s)", style = MaterialTheme.typography.labelLarge)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                DashboardMetric("Total", "S/ ${String.format(Locale.getDefault(), "%.2f", salesTotal(todaySales))}", Icons.Default.AttachMoney, Modifier.weight(1f))
+                DashboardMetric("Yape", "S/ ${String.format(Locale.getDefault(), "%.2f", salesTotal(todaySales, "Yape"))}", Icons.Default.QrCode2, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
 fun SaleDetailDialog(sale: Sale, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val text = ticketText(
+        businessName = "Cyber Control",
         cabinName = sale.cabinName,
         amount = sale.amount,
         paymentMethod = sale.paymentMethod,
@@ -1747,6 +1974,11 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
         Text("Configuración", modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
 
         SettingsSection(title = "General", icon = Icons.Default.Tune) {
+            SettingsTextField(
+                value = settings.businessName,
+                onValueChange = { onSettingsChange(settings.copy(businessName = it)) },
+                label = "Nombre del negocio"
+            )
             SettingsTextField(value = settings.cabinCount.toString(), onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(cabinCount = n)) } }, label = "Número de Cabinas", keyboardType = KeyboardType.Number)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 Text("Incluir Cabina 0", modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
@@ -1776,6 +2008,7 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
                 label = "Mínimo cobrable antes de cobrar normal",
                 keyboardType = KeyboardType.Number
             )
+            Text("Ejemplo: 60 cobra como minimo 1 hora aunque usen menos.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 Column(Modifier.weight(1f)) {
                     Text("Interpolar por precios de presets", fontWeight = FontWeight.Medium)
@@ -1783,6 +2016,29 @@ fun SettingsScreen(settings: AppSettings, onSettingsChange: (AppSettings) -> Uni
                 }
                 Switch(checked = settings.usePresetPriceInterpolation, onCheckedChange = { onSettingsChange(settings.copy(usePresetPriceInterpolation = it)) })
             }
+        }
+
+        SettingsSection(title = "Alertas", icon = Icons.Default.NotificationsActive) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("Avisar cuando falten 5 minutos", fontWeight = FontWeight.Medium)
+                    Text("Para tiempo controlado.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+                Switch(checked = settings.alertFiveMinutes, onCheckedChange = { onSettingsChange(settings.copy(alertFiveMinutes = it)) })
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("Avisar cuando falte 1 minuto", fontWeight = FontWeight.Medium)
+                    Text("Te avisa aunque no estes mirando esa cabina.", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+                Switch(checked = settings.alertOneMinute, onCheckedChange = { onSettingsChange(settings.copy(alertOneMinute = it)) })
+            }
+            SettingsTextField(
+                value = settings.repeatOverdueAlertMinutes.toString(),
+                onValueChange = { it.toIntOrNull()?.let { n -> onSettingsChange(settings.copy(repeatOverdueAlertMinutes = n.coerceAtLeast(1))) } },
+                label = "Repetir vencida cada X min",
+                keyboardType = KeyboardType.Number
+            )
         }
 
         SettingsSection(title = "Zonas de Precios", icon = Icons.Default.Sell, action = { IconButton(onClick = { showAddGroup = true }) { Icon(Icons.Default.AddCircle, null, tint = MaterialTheme.colorScheme.primary) } }) {
@@ -1915,7 +2171,7 @@ fun InfoScreen() {
 
         Spacer(Modifier.height(24.dp))
         Text("Cyber Control", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
-        Text("Versión 1.0", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+        Text("Versión 1.2.0", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
 
         Spacer(Modifier.height(32.dp))
 
