@@ -59,6 +59,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -849,6 +850,7 @@ fun CheckoutTicketScreen(
     val context = LocalContext.current
     var paymentMethod by rememberSaveable { mutableStateOf(defaultPayment) }
     var proofUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var proofRotationDegrees by rememberSaveable { mutableFloatStateOf(0f) }
     var pendingPhotoUri by remember { mutableStateOf<Uri?>(null) }
     val pulse by rememberInfiniteTransition(label = "ticket-bg").animateFloat(
         initialValue = 0.08f,
@@ -857,7 +859,10 @@ fun CheckoutTicketScreen(
         label = "pulse"
     )
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-        if (ok) proofUri = pendingPhotoUri?.toString()
+        if (ok) {
+            proofUri = pendingPhotoUri?.toString()
+            proofRotationDegrees = 0f
+        }
     }
     val proofBitmap = remember(proofUri) {
         proofUri?.let { uri ->
@@ -934,16 +939,41 @@ fun CheckoutTicketScreen(
                         Text("Prueba de Yape", fontWeight = FontWeight.Bold)
                         Text(if (proofUri == null) "Opcional: toma una foto del pago ahora." else "Foto agregada como prueba local.", style = MaterialTheme.typography.bodySmall)
                         proofBitmap?.let { bitmap ->
-                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Image(
                                     bitmap = bitmap.asImageBitmap(),
                                     contentDescription = "Prueba de Yape",
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .heightIn(min = 160.dp, max = 260.dp)
-                                        .clip(RoundedCornerShape(14.dp)),
-                                    contentScale = ContentScale.Fit
+                                        .aspectRatio(1f)
+                                        .graphicsLayer { rotationZ = proofRotationDegrees },
+                                    contentScale = ContentScale.Crop
                                 )
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilledTonalButton(
+                                    onClick = { proofRotationDegrees = (proofRotationDegrees - 90f + 360f) % 360f },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.RotateLeft, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Izquierda")
+                                }
+                                FilledTonalButton(
+                                    onClick = { proofRotationDegrees = (proofRotationDegrees + 90f) % 360f },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.RotateRight, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Derecha")
+                                }
                             }
                         }
                         Button(onClick = {
@@ -2204,7 +2234,7 @@ fun InfoScreen() {
 
         Spacer(Modifier.height(24.dp))
         Text("Cyber Control", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Black)
-        Text("Versión 1.2.1", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+        Text("Versión 1.2.2", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
 
         Spacer(Modifier.height(32.dp))
 
