@@ -1,4 +1,4 @@
-name: Build APKs (x86_64 & armeabi-v7a)
+name: Build Android APKs
 
 on:
   push:
@@ -22,20 +22,45 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build debug APKs (x86_64 & armeabi-v7a)
-        run: ./gradlew assembleDebug
+      - name: Run unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Build debug APKs
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload universal APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-universal-debug
+          path: app/build/outputs/apk/debug/*universal*.apk
+          if-no-files-found: error
+
+      - name: Upload arm64-v8a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-arm64-v8a-debug
+          path: app/build/outputs/apk/debug/*arm64-v8a*.apk
+          if-no-files-found: error
 
       - name: Upload x86_64 APK
         uses: actions/upload-artifact@v4
         with:
           name: app-x86_64-debug
           path: app/build/outputs/apk/debug/*x86_64*.apk
+          if-no-files-found: error
 
       - name: Upload armeabi-v7a APK
         uses: actions/upload-artifact@v4
         with:
           name: app-armeabi-v7a-debug
           path: app/build/outputs/apk/debug/*armeabi-v7a*.apk
+          if-no-files-found: error
